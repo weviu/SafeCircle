@@ -1,14 +1,12 @@
 # SafeCircle
 
-School-to-home child safety platform (backend + Android app, one monorepo).
+School to home child safety platform (Android app).
 
 ## Setup
 
 ```bash
 cp .env.example .env   # then edit the values
 ```
-
-`.env` is gitignored — never commit it. Real secrets live only there.
 
 ## Run
 
@@ -17,12 +15,9 @@ docker compose up --build -d
 ```
 
 Services:
-
-| service   | role                        | host port |
-| --------- | --------------------------- | --------- |
-| `nginx`   | reverse proxy (entry point) | 8080      |
-| `api`     | NestJS backend              | none (internal 3000) |
-| `postgres`| PostgreSQL 17 (volume `pgdata`) | none  |
+`nginx`:    reverse proxy (entry point). Port: 8080      |
+`api`:      NestJS backend  Port: 3000
+`postgres`: PostgreSQL 17
 
 ## Health check
 
@@ -38,5 +33,3 @@ curl -i http://localhost:8080/health
 docker compose down        # keeps the pgdata volume
 docker compose down -v     # deletes the database volume
 ```
-
-See `reconstruction-and-plan.md` for the full project plan and locked-in decisions.
