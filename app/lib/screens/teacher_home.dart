@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../notifications/notification_bell.dart';
+import '../notifications/notifications_providers.dart';
 import '../providers.dart';
 import '../reports/iso_week.dart';
 import '../reports/report_values.dart';
@@ -52,6 +56,7 @@ class _TeacherHomeState extends ConsumerState<TeacherHome> {
   @override
   void initState() {
     super.initState();
+    unawaited(ref.read(pushControllerProvider).startSession());
     _loadClasses();
   }
 
@@ -239,7 +244,10 @@ class _TeacherHomeState extends ConsumerState<TeacherHome> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Günlük Rapor')),
+      appBar: AppBar(
+        title: const Text('Günlük Rapor'),
+        actions: const [NotificationBell()],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(

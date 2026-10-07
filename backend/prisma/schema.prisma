@@ -36,6 +36,10 @@ enum Behavior {
   SEVERE
 }
 
+enum NotificationType {
+  REPORT_FLAG
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -48,6 +52,8 @@ model User {
   counselorSchools CounselorSchool[]
   refreshTokens    RefreshToken[]
   reportEntries    ReportEntry[]
+  notifications    Notification[]
+  pushSubscriptions PushSubscription[]
 
   @@map("users")
 }
@@ -159,4 +165,34 @@ model ReportEntry {
   @@index([reportDate])
   @@index([authorId])
   @@map("report_entries")
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String           @map("user_id")
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?        @map("read_at")
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+model PushSubscription {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  topic      String    @unique
+  platform   String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastSeenAt DateTime? @map("last_seen_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
 }

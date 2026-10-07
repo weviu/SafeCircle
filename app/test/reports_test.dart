@@ -11,11 +11,16 @@ import 'package:safecircle/auth/auth_repository.dart';
 import 'package:safecircle/auth/session.dart';
 import 'package:safecircle/config/api_config.dart';
 import 'package:safecircle/main.dart';
+import 'package:safecircle/notifications/notifications_models.dart';
+import 'package:safecircle/notifications/notifications_providers.dart';
+import 'package:safecircle/notifications/notifications_repository.dart';
+import 'package:safecircle/notifications/push_controller.dart';
 import 'package:safecircle/providers.dart';
 import 'package:safecircle/reports/classes_repository.dart';
 import 'package:safecircle/reports/reports_models.dart';
 import 'package:safecircle/reports/reports_repository.dart';
 import 'package:safecircle/screens/login_screen.dart';
+import 'package:safecircle/screens/notifications_screen.dart';
 import 'package:safecircle/screens/teacher_home.dart';
 
 const _password = 'Passw0rd!123';
@@ -34,6 +39,20 @@ Future<void> _until(
       () => Future<void>.delayed(const Duration(milliseconds: 100)),
     );
     await tester.pump(const Duration(milliseconds: 50));
+  }
+}
+
+/// Like [_until] but fails loudly with [description] instead of returning
+/// quietly — without this a timed-out wait surfaces later as an unrelated
+/// finder error (e.g. `found` asserting inside a mismatch description).
+Future<void> _untilOrFail(
+  WidgetTester tester,
+  String description,
+  bool Function() done,
+) async {
+  await _until(tester, done);
+  if (!done()) {
+    throw TestFailure('timed out waiting for $description');
   }
 }
 
@@ -124,6 +143,28 @@ class _StubReportsRepository implements ReportsRepository {
   }) {
     throw UnimplementedError();
   }
+}
+
+/// Stub repo so the pure-widget parent test never touches the backend: any
+/// push-session call fails fast (and quietly) inside [PushController].
+class _StubNotificationsRepository extends NotificationsRepository {
+  _StubNotificationsRepository()
+      : super(Dio(BaseOptions(baseUrl: ApiConfig.baseUrl)));
+
+  @override
+  Future<NotificationList> list({int limit = 50}) => throw UnimplementedError();
+
+  @override
+  Future<int> unreadCount() => throw UnimplementedError();
+
+  @override
+  Future<void> markRead(String id) => throw UnimplementedError();
+
+  @override
+  Future<void> markAllRead() => throw UnimplementedError();
+
+  @override
+  Future<AppSubscription> subscribe() => throw UnimplementedError();
 }
 
 void main() {
@@ -368,6 +409,12 @@ void main() {
           reportsRepositoryProvider.overrideWithValue(
             _StubReportsRepository(summary),
           ),
+          // Push startup must stay off the backend (the stub session's token
+          // is fake): override the notifications repo so the push session's
+          // subscribe/unread calls fail fast without touching the network.
+          notificationsRepositoryProvider.overrideWithValue(
+            _StubNotificationsRepository(),
+          ),
         ],
         child: const SafeCircleApp(),
       ),
@@ -398,6 +445,169 @@ void main() {
       find.text('Demo verileri 2026-W39 ve 2026-W40 haftalarında yüklüdür.'),
       findsNothing,
     );
+
+    await tester.pumpAndSettle(const Duration(seconds: 60));
+  });
+
+  testWidgets('parent: flag on a fresh day raises a live push, bell badge and inbox row', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    const flagDate = '2026-10-12'; // 2026-W42 — leaves today's W41 empty intact.
+
+    await tester.pumpWidget(const ProviderScope(child: SafeCircleApp()));
+    await tester.pumpAndSettle();
+    expect(find.byType(LoginScreen), findsOneWidget);
+
+    await tester.enterText(find.byType(TextFormField).at(0), 'parent2@test.local');
+    await tester.enterText(find.byType(TextFormField).at(1), _password);
+    await tester.tap(find.text('Log in'));
+    await tester.pump();
+
+    await _until(tester, () => find.byKey(const Key('week-label')).evaluate().isNotEmpty);
+    await _until(
+      tester,
+      () => find.text('Bu hafta için kayıt yok').evaluate().isNotEmpty,
+    );
+
+    final bell = find.byKey(const Key('notifications-bell'));
+    expect(bell, findsOneWidget);
+    bool badgeVisible() => tester
+        .widgetList<Badge>(
+          find.descendant(of: bell, matching: find.byType(Badge)),
+        )
+        .any((badge) => badge.isLabelVisible);
+
+    // The API has no delete endpoint, so an aborted run can leave rows behind
+    // (a still-flagged W42 entry, unread notifications). Reset the entry to
+    // unflagged through the API first — that makes the flag below always a
+    // genuine new-flag transition, whatever the previous run left behind.
+    Future<void> saveZeynep({required String behavior}) async {
+      await tester.runAsync(() async {
+        final dio = await _authedDio('teacher1@test.local', _password);
+        final reports = ReportsRepository(dio);
+        final cls = (await ClassesRepository(dio).listClasses()).firstWhere(
+          (c) => c.label == '5-A',
+        );
+        final students = await ClassesRepository(dio).listStudents(cls.id);
+        final zeynep = students.firstWhere((s) => s.schoolNumber == '1003');
+        await reports.createEntries(
+          classId: cls.id,
+          reportDate: flagDate,
+          entries: [
+            EntryPayload(
+              studentId: zeynep.id,
+              attendance: 'PRESENT',
+              homework: 'DONE',
+              behavior: behavior,
+            ),
+          ],
+        );
+      });
+    }
+
+    Future<int> unreadForParent2() async {
+      return await tester.runAsync<int>(() async {
+            final dio = await _authedDio('parent2@test.local', _password);
+            return (await NotificationsRepository(dio).list()).unreadCount;
+          }) ??
+          0;
+    }
+
+    await saveZeynep(behavior: 'NEUTRAL'); // unflagged precondition
+    final baselineUnread = await unreadForParent2();
+
+    // The controller fetches the unread count when the session starts, so the
+    // badge settles asynchronously — poll for it instead of asserting blind.
+    await _untilOrFail(
+      tester,
+      'the badge to match the backend unread baseline ($baselineUnread)',
+      () => badgeVisible() == (baselineUnread > 0),
+    );
+
+    // Flag Zeynep for that day as teacher1; parent2 (linked to Zeynep) should
+    // get a REPORT_FLAG notification pushed over the live ntfy stream.
+    await saveZeynep(behavior: 'SEVERE');
+    await _untilOrFail(tester, 'the bell badge after a new flag', badgeVisible);
+
+    // Open the inbox. Rows load asynchronously after the route opens, and the
+    // tile is located by title *and* the 'Yeni' unread marker, so leftover rows
+    // from earlier runs can't hijack the tap.
+    await tester.tap(bell);
+    await tester.pump();
+    await _untilOrFail(
+      tester,
+      'the notifications route to open',
+      () => find.byType(NotificationsScreen).evaluate().isNotEmpty,
+    );
+    expect(find.byType(NotificationsScreen), findsOneWidget);
+
+    final zeynepTiles = find.ancestor(
+      of: find.text('Uyarı: Zeynep Kaya'),
+      matching: find.byType(ListTile),
+    );
+    final unreadTile = find.ancestor(
+      of: find.descendant(of: zeynepTiles, matching: find.text('Yeni')),
+      matching: find.byType(ListTile),
+    );
+    await _untilOrFail(
+      tester,
+      'an unread Zeynep notification row in the inbox',
+      () => unreadTile.evaluate().isNotEmpty,
+    );
+
+    // Tap the unread row → reads it → the backend unread count drops by one
+    // and the badge follows (it lives in the home screen's app bar, still
+    // mounted under the pushed route).
+    final unreadBeforeTap = await unreadForParent2();
+    final unreadMarkersBefore = find.text('Yeni').evaluate().length;
+    await tester.tap(unreadTile.first);
+    await tester.pump();
+    await _untilOrFail(
+      tester,
+      'one fewer unread marker in the inbox after tapping the row',
+      () => find.text('Yeni').evaluate().length == unreadMarkersBefore - 1,
+    );
+    expect(await unreadForParent2(), unreadBeforeTap - 1);
+    await _untilOrFail(
+      tester,
+      'the badge to follow the unread count',
+      () => badgeVisible() == (unreadBeforeTap - 1 > 0),
+    );
+
+    // Pull-to-refresh stays available on the inbox (its own behaviour — a fresh
+    // fetch swapping the rows — is covered deterministically in
+    // notifications_test.dart with a stubbed repository; driving the real HTTP
+    // call from a fling can't settle under flutter_test's fake async).
+expect(find.byType(RefreshIndicator), findsOneWidget);
+expect(await unreadForParent2(), unreadBeforeTap - 1);
+
+    // Cleanup: unflag the W42 entry so future runs get a fresh notification.
+    await tester.runAsync(() async {
+      final dio = await _authedDio('teacher1@test.local', _password);
+      final classes = await ClassesRepository(dio).listClasses();
+      final cls = classes.firstWhere((c) => c.label == '5-A');
+      final entries = await ReportsRepository(dio).listEntries(
+        classId: cls.id,
+        date: flagDate,
+      );
+      final zeynepEntry = entries.firstWhere(
+        (e) => e.flagged,
+        orElse: () => entries.first,
+      );
+      await ReportsRepository(dio).createEntries(
+        classId: cls.id,
+        reportDate: flagDate,
+        entries: [
+          EntryPayload(
+            studentId: zeynepEntry.studentId,
+            attendance: 'PRESENT',
+            homework: 'DONE',
+            behavior: 'NEUTRAL',
+          ),
+        ],
+      );
+    });
 
     await tester.pumpAndSettle(const Duration(seconds: 60));
   });

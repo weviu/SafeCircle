@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'providers.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
+import 'screens/notifications_screen.dart';
 import 'screens/parent_home.dart';
 import 'screens/splash_screen.dart';
 import 'screens/teacher_home.dart';
@@ -35,12 +36,14 @@ final routerProvider = Provider<GoRouter>((ref) {
       }
 
       // Authenticated: login/splash land on the role-specific home, and
-      // another role's home is not allowed (role-based redirect).
+      // another role's home is not allowed (role-based redirect). The shared
+      // notifications inbox is reachable for roles that have one.
       final home = homeForRole(current.role);
       if (home == '/') {
         return home; // unknown role — unreachable with backend enum
       }
-      if (location == '/' || location == '/login' || location != home) {
+      final permitted = location == home || home == '/parent' && location == '/notifications' || home == '/teacher' && location == '/notifications';
+      if (location == '/' || location == '/login' || !permitted) {
         return home;
       }
       return null;
@@ -50,6 +53,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
       GoRoute(path: '/parent', builder: (context, state) => const ParentHome()),
       GoRoute(path: '/teacher', builder: (context, state) => const TeacherHome()),
+      GoRoute(
+        path: '/notifications',
+        builder: (context, state) => const NotificationsScreen(),
+      ),
       GoRoute(
         path: '/counselor',
         builder: (context, state) => const PlaceholderHome(role: 'counselor'),

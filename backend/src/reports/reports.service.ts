@@ -4,11 +4,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Attendance, Behavior, Homework, Prisma, ReportEntry, Role } from '../generated/prisma';
+import { Attendance, Behavior, Homework, NotificationType, Prisma, ReportEntry, Role } from '../generated/prisma';
 import { PrismaService } from '../prisma.service';
 import { SchoolsService } from '../schools/schools.service';
 import { UsersService, UserProfile } from '../users/users.service';
-import { evaluateFlags } from './flagging';
+import { NotificationsService } from '../notifications/notifications.service';
+import { evaluateFlags, FLAG_REASON_LABELS } from './flagging';
 import { currentWeek, parseIsoWeek, toUtcDateString } from './iso-week';
 import { CreateReportDto } from './dto/create-report.dto';
 import { UpdateReportEntryDto } from './dto/update-report-entry.dto';
@@ -19,6 +20,7 @@ export class ReportsService {
     private readonly prisma: PrismaService,
     private readonly schools: SchoolsService,
     private readonly users: UsersService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async createEntries(authorId: string, dto: CreateReportDto) {
@@ -47,6 +49,7 @@ export class ReportsService {
     }
 
     const reportDate = new Date(`${dto.reportDate}T00:00:00Z`);
+    const studentById = new Map(inClass.map((student) => [student.id, student]));
     const saved: ReportEntry[] = [];
     for (const input of dto.entries) {
       const context = await this.prisma.reportEntry.findMany({
@@ -61,6 +64,13 @@ export class ReportsService {
         },
         context,
       );
+      // Fetch the previous row for the unique key *before* upserting so an
+      // identical re-save does not notify again (diff on flagged/flagReason).
+      const prev = await this.prisma.reportEntry.findUnique({
+        where: {
+          studentId_authorId_reportDate: { studentId: input.studentId, authorId, reportDate },
+        },
+      });
       const entry = await this.prisma.reportEntry.upsert({
         where: { studentId_authorId_reportDate: { studentId: input.studentId, authorId, reportDate } },
         create: {
@@ -82,6 +92,14 @@ export class ReportsService {
         },
       });
       saved.push(entry);
+      if (this.shouldNotify(prev, flags)) {
+        await this.notifyFlag(
+          input.studentId,
+          studentById.get(input.studentId)?.name ?? 'Öğrenci',
+          reportDate,
+          flags.flagReason!,
+        );
+      }
     }
     return saved.map((entry) => this.serializeEntry(entry));
   }
@@ -135,6 +153,15 @@ export class ReportsService {
       await this.prisma.reportEntry.findMany({ where: { studentId: existing.studentId, NOT: { id } } }),
     );
     const updated = await this.prisma.reportEntry.update({ where: { id }, data: { ...data, ...flags } });
+    if (this.shouldNotify(existing, flags)) {
+      const [student] = await this.schools.studentsByIds([existing.studentId]);
+      await this.notifyFlag(
+        existing.studentId,
+        student?.name ?? 'Öğrenci',
+        existing.reportDate,
+        flags.flagReason!,
+      );
+    }
     return this.serializeEntry(updated);
   }
 
@@ -247,6 +274,43 @@ export class ReportsService {
   private async requireOwnedClass(teacherId: string, classId: string): Promise<string> {
     const cls = await this.schools.requireClassAccess(teacherId, Role.TEACHER, classId);
     return cls.id;
+  }
+
+  /**
+   * Notify only when a flag is newly set or its reason changes. Re-sending the
+   * same values (same flagged + same reason) notifies nobody; un-flagging (the
+   * flag is being removed) also notifies nobody.
+   */
+  private shouldNotify(prev: ReportEntry | null, flags: { flagged: boolean; flagReason: string | null }): boolean {
+    if (!flags.flagged || flags.flagReason === null) {
+      return false;
+    }
+    if (prev === null) {
+      return true; // new row, flagged at creation
+    }
+    return !prev.flagged || prev.flagReason !== flags.flagReason;
+  }
+
+  private async notifyFlag(
+    studentId: string,
+    studentName: string,
+    reportDate: Date,
+    flagReason: string,
+  ): Promise<void> {
+    const label = FLAG_REASON_LABELS[flagReason] ?? flagReason;
+    const dateString = toUtcDateString(reportDate);
+    // Recipients are the student's linked parents — reached via UsersService
+    // (public API), never by querying parent_student directly.
+    const parentIds = await this.users.parentIdsForStudent(studentId);
+    for (const parentId of parentIds) {
+      await this.notifications.notify(
+        parentId,
+        NotificationType.REPORT_FLAG,
+        `Uyarı: ${studentName}`,
+        `${studentName} — ${label} (${dateString})`,
+        { studentId, reportDate: dateString, flagReason },
+      );
+    }
   }
 
   private badWeek(week: string | undefined): never {

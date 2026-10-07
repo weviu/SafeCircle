@@ -13,7 +13,9 @@ cd backend && npx prisma generate   # src/generated/ is gitignored — required
 `.env` is gitignored — never commit it. Secrets live only there.
 `DATABASE_URL` must point at the compose service (`postgres:5432`) and match
 the `POSTGRES_*` values; `JWT_SECRET` should be a long random string
-(`openssl rand -hex 32`).
+(`openssl rand -hex 32`). `NTFY_BASE_URL=http://ntfy:2586` enables real push;
+leave it empty to run with a logging-only transport (the in-app inbox still
+works, nothing is published).
 
 ## Run
 
@@ -33,6 +35,10 @@ Services:
 | `nginx`    | reverse proxy (entry point)              | 8080      |
 | `api`      | NestJS + Prisma backend                  | none (internal 3000) |
 | `postgres` | PostgreSQL 17 (volume `pgdata`)          | none      |
+| `ntfy`     | self-hosted push broker (volume `ntfy_data`, v2.28.0) | none (internal 2586) |
+
+nginx also proxies `/ntfy/` to the `ntfy` service with response buffering
+off, so the app can hold a long-lived JSON stream through it.
 
 ## Health check
 
@@ -73,6 +79,37 @@ Flag reasons, computed when an entry is written (no backfill):
 Mon–Fri school days all ABSENT/LATE), `homework_streak` (≥3 consecutive
 entries all NOT_DONE).
 
+## API (Phase 2c, notifications + push)
+
+| method | path                          | auth  | notes |
+| ------ | ----------------------------- | ----- | ----- |
+| GET    | `/notifications`              | Bearer| `?limit=` (default 50) → `{ items[], unreadCount }`, own rows only, newest first |
+| POST   | `/notifications/:id/read`     | Bearer| 201 → the row; **404 if it belongs to another user** |
+| POST   | `/notifications/read-all`     | Bearer| → `{ ok: true, updated }` |
+| POST   | `/notifications/subscribe`    | Bearer| → `{ topic }`, server-generated and stable per (user, platform) |
+
+When a teacher saves an entry that is newly flagged **or** changes flag
+reason, a `REPORT_FLAG` notification is created for each linked parent and
+fanned out to that user's push subscriptions. Re-saving identical data does
+not notify again. The inbox row is written **before** fan-out, so a broken or
+absent push transport never fails the report request (transport errors are
+logged only — no retries this phase).
+
+Push goes through a `PushTransport` interface with two implementations:
+`NtfyTransport` (HTTP to `NTFY_BASE_URL`) and `LogOnlyPushTransport` (default
+when `NTFY_BASE_URL` is unset). Swapping in FCM later means implementing the
+same interface and rebinding the DI token — no caller changes.
+
+> **Foreground-only.** The Flutter app subscribes to
+> `GET /ntfy/{topic}/json` while it is running; there is no background
+> delivery, UnifiedPush, or FCM yet. The ntfy **topic suffix is required** —
+> a bare `/ntfy/{topic}` returns a topic-info document, not a stream.
+>
+> **Security.** Topics are unguessable 48-hex values, but ntfy itself is
+> unauthenticated: whoever holds a topic can publish to it or read it. Fine
+> for the pilot (the topic is only ever returned to its own user via the API),
+> but put access control on ntfy before exposing it publicly.
+
 ## App (Phase 1.5 + 2, Flutter)
 
 Flutter app in `app/` — Riverpod + go_router + dio. Login screen posts to
@@ -94,6 +131,13 @@ refresh fails. Reporting screens:
   **2026-W39/W40**; today's week, 2026-W41, is empty).
 - **Counselor / Admin (`/counselor`, `/admin`)** — placeholder home;
   real screens arrive in Phase 4.
+- **Parent & Teacher (`/notifications`)** — a bell in the AppBar shows an
+  unread Badge. While the app is open it streams ntfy
+  (`GET /ntfy/{topic}/json`) and refreshes the badge on every new
+  notification; tapping the bell opens the inbox (**Bildirimler**) — tap a
+  row to mark it read, or **Tümünü okundu işaretle**; pull down to refresh.
+  Both homes start the stream on mount and drop it on dispose; the stream
+  reconnects with a backoff.
 
 ### Demo walkthrough (seeded data)
 
@@ -110,6 +154,12 @@ refresh fails. Reporting screens:
    zero-filled attendance/homework/behavior counts per child.
 4. Counselor: `counselor1@test.local` → Phase-4 placeholder (in scope: the
    role-scoped `GET /reports/flagged` endpoint, curl-verified).
+5. Notifications: keep the parent app open, and from a second terminal save a
+   flag for **Zeynep Kaya** on a date with no data yet (e.g. **2026-10-12**,
+   2026-W42) as `teacher1@test.local`. The parent's bell badge appears
+   without a reload; opening the bell shows
+   **Uyarı: Zeynep Kaya** — *Zeynep Kaya — uyarı davranışı (2026-10-12)*.
+   Re-saving the same values creates nothing new.
 
 > Week/day navigation is the `‹ ›` arrow buttons — there is no calendar picker
 > yet, so reach seeded dates/W39–W40 by stepping back from today.
@@ -117,7 +167,8 @@ refresh fails. Reporting screens:
 ```bash
 cd app
 flutter pub get
-flutter test          # E2E against a running stack (real signup/login/refresh HTTP)
+flutter test          # E2E against a running stack (real signup/login/refresh
+                      # HTTP + a live notification/badge/inbox flow)
 
 # dev targets
 flutter run -d linux                                  # desktop (default http://localhost:8080)
@@ -149,7 +200,8 @@ docker compose up --build -d
 ```
 
 Never use `prisma db push` — always `migrate dev`, and review the generated
-`migration.sql` before committing it.
+`migration.sql` before committing it. Applied so far: `init`, `reporting`,
+`notifications` (the last one adds the inbox and push-subscription tables).
 
 ## Seed data
 

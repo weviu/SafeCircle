@@ -59,7 +59,8 @@ Claude directly in chat — using a worker agent for implementation, with Claude
 - **Reverse proxy: Nginx** (not Caddy — no domain yet; user has and uses
   certbot). HTTPS/certbot to be added later once a domain is acquired. For now,
   Nginx proxies plain HTTP on the VPS IP.
-- **Containerization:** Docker Compose. Services: `api`, `postgres`, `nginx`.
+- **Containerization:** Docker Compose. Services: `api`, `postgres`, `nginx`,
+  plus **`ntfy`** (self-hosted push, added Phase 2c).
 - **Postgres:** current stable, version pinned in compose (e.g. `postgres:17`),
   named volume for data persistence (`pgdata`) — never use ephemeral storage.
 - **Secrets:** `.env` file, gitignored from first commit, never hardcoded.
@@ -121,6 +122,15 @@ students (id, class_id, name, school_number)
 parent_student   (parent_id, student_id)      -- many:many join table
 teacher_class    (teacher_id, class_id)        -- many:many join table
 counselor_school (counselor_id, school_id)     -- many:many join table
+```
+
+Phase 2 additions (extend, don't redesign):
+
+```
+notifications (id, user_id, type, title, body, data_jsonb, read_at, created_at)
+  type: enum [report_flag]
+push_subscriptions (id, user_id, platform, topic, created_at, last_seen_at)
+  -- one row per (user, platform); topic is server-generated and reused
 ```
 
 Rule for extending this later: **new relationship = new join table**, never a
@@ -390,13 +400,134 @@ raised to the user first.
       stay findable in widget tests. (3) no new pubspec packages. Counselors
       get the placeholder because only their `GET /reports/flagged`
       endpoint is in Phase 2 scope — the counselor screen is Phase 4.
-  - **Push transport (decision in progress):** no Firebase/FCM — user wants
-    no third-party dependencies. Working plan: `notifications` table +
-    in-app unread surface with a `PushTransport` interface (no-op now),
-    then self-hosted **ntfy** as a compose service wired to it. Android
-    background push without Google is best-effort by nature; the counselor's
-    "call parent now" stays the real escalation path. Confirm before
-    building.
+  - **Push transport (decision locked 2026-10-07, Phase 2c):** no Firebase/FCM
+    — user wants no third-party dependencies. Locked design:
+    - `notifications` + `push_subscriptions` tables; the inbox row is the
+      source of truth, push is best-effort decoration on top.
+    - A `PushTransport` interface behind an `PUSH_TRANSPORT` DI token, with
+      `NtfyTransport` (HTTP) and `LogOnlyPushTransport` (no config). FCM
+      remains a drop-in: implement the same interface and rebind the token —
+      no caller changes.
+    - Self-hosted **ntfy v2.28.0** as a compose service, proxied by nginx.
+    - **Android background push without Google is not solvable this phase.**
+      The client subscribes to an ntfy JSON stream while the app is in the
+      foreground; there is no UnifiedPush, no FCM, no wake-from-background.
+      The counselor's "call parent now" stays the real escalation path.
+    - **Security limitation (accepted for pilot):** topics are unguessable 48-hex
+      values but ntfy itself is unauthenticated — anyone holding a topic can
+      publish into it or read it. Acceptable only because the topic never
+      leaves the app's own API response; hard-code an ntfy access token /
+      per-topic ACLs before any public exposure.
+    - `NTFY_BASE_URL` empty/unset ⇒ `LogOnlyPushTransport`, so local dev and
+      tests never need ntfy running.
+
+- **Verification note (2026-10-07, Phase 2c — notifications + push):**
+  - **Schema/migration:** `NotificationType` (`REPORT_FLAG`), `Notification`,
+    `PushSubscription` + `User.notifications`/`pushSubscriptions` relations via
+    `prisma migrate dev --name notifications`
+    (`backend/prisma/migrations/20261007135939_notifications/migration.sql`);
+    `push_subscriptions` carries `topic` as `@unique` plus a plain
+    `@@index([userId])` — deliberately **no** unique index on
+    `(userId, platform)`, because `platform` is nullable and Postgres treats
+    NULLs as distinct, so it could not enforce "one subscription per
+    (user, platform)" anyway. Uniqueness of the topic is the integrity net;
+    `ensureSubscription` does `findFirst` then `create`. See deviations.
+    Verified from-scratch `down -v && up --build`: all three migrations
+    apply, seed prints 60 report entries, `prisma migrate status` →
+    "Database schema is up to date!", `/health` → `{"status":"ok"}`.
+  - **Backend module** `src/notifications/`: `NotificationsController`
+    (Bearer-authenticated, no `@Public`/`@Roles`), `NotificationsService`,
+    `PushTransport`/`NtfyTransport`/`LogOnlyPushTransport` behind the
+    `PUSH_TRANSPORT` token. Endpoints (all curl-verified):
+    `GET /notifications?limit=` → `{items[], unreadCount}`,
+    `POST /notifications/:id/read` → 201, **404 when the row is another user's**
+    (verified cross-user), `POST /notifications/read-all` → `{ok, updated}`,
+    `POST /notifications/subscribe` → `{topic}`, server-generated
+    `sc_` + 48 hex chars, **stable per (user, platform)** (verified: two
+    consecutive calls return the same topic), `lastSeenAt` bumped on reuse.
+  - **Trigger:** `ReportsService` notifies a student's parents
+    (`UsersService.parentIdsForStudent()`) only when the entry is newly
+    flagged **or** the flag reason changed — verified: identical re-POST →
+    still 1 notification; `behavior_severe` → `behavior_concern` → 2.
+    Inbox write happens **before** fan-out, so the report POST still returns
+    201 when push is broken (verified with `NTFY_BASE_URL=http://127.0.0.1:9`:
+    201 + row persisted + log line
+    `push publish failed for topic sc_…: fetch failed` + `/health` 200).
+    Cross-user scoping verified: a flag for Zeynep appears for `parent2` and
+    `parent1`'s inbox stays empty.
+  - **ntfy wiring:** compose service `ntfy` (v2.28.0, volume `ntfy_data`),
+    nginx `location /ntfy/ { proxy_pass http://ntfy:2586/; … buffering off }`.
+    **Deviation recorded (accepted):** the phase plan wrote `/ntfy/{topic}`,
+    but ntfy ≥2 requires the **explicit format suffix** — the client
+    subscribes to `GET /ntfy/{topic}/json` (newline-delimited JSON) and
+    publishing stays `POST /ntfy/{topic}`. Bare `/ntfy/{topic}` is only a
+    topic-info document, not a stream.
+    **Overseer (accepted):** `nginx.depends_on: ntfy` stays. The "no other
+    compose changes" line was so `api` would not depend on ntfy (publish
+    failures stay non-fatal — still true). Nginx's literal
+    `proxy_pass http://ntfy:2586/` resolves the upstream at start; without
+    `depends_on`, a parallel `up` can fail to resolve `ntfy` and nginx exits.
+  - **Flutter (`app/lib`):** `notifications/` — `notifications_models.dart`,
+    `notifications_repository.dart`, `ntfy_events.dart` (chunk-safe
+    line-buffered parser: partial lines are held in a remainder, `open`/
+    `keepalive` housekeeping and garbage are dropped),
+    `push_controller.dart` (dio stream on `/ntfy/{topic}/json`, exponential
+    reconnect, refreshes the unread count), `notifications_providers.dart`,
+    `notification_bell.dart` (AppBar bell + unread Badge);
+    `screens/notifications_screen.dart` (inbox, tap-to-read, "Tümünü okundu
+    işaretle", **pull-to-refresh** keeping the current rows visible while
+    re-fetching — the empty state is a `ListView` with
+    `AlwaysScrollableScrollPhysics` so it stays pullable, Turkish
+    empty/error states); teacher/parent homes start the
+    session in `initState` and show the bell; router allows `/notifications`
+    for parent+teacher roles only. **No new pubspec packages.**
+    - Riverpod note: `ChangeNotifierProvider` now lives in
+      `package:flutter_riverpod/legacy.dart` (Riverpod 3.x) and the provider
+      **auto-disposes its notifier** — do not add `ref.onDispose(c.dispose)`
+      (double-dispose crash: "A PushController was used after being disposed").
+      Stub-based widget tests must override `notificationsRepositoryProvider`,
+      not the notifier provider (`overrideWithValue` doesn't exist on it).
+  - **Tests (19/19 green, `flutter analyze` clean, `flutter build linux`
+    green, re-verified after a full `docker compose down -v && up --build`):**
+    6 parser unit tests + 1 stubbed pull-to-refresh widget test
+    (`test/notifications_test.dart`); one live widget test in
+    `test/reports_test.dart` drives the real stack — teacher flags Zeynep
+    on 2026-10-12 via the API while the parent app is mounted, asserts the
+    bell badge appears, opens the inbox, checks the row, taps it and asserts
+    the backend unread count drops by one. It uses **2026-10-12 (W42)**
+    because the W41 empty-state test must keep seeing an empty week.
+    - **Test hardening (2026-10-07):** the live test used to assume an empty
+      inbox and a clean flag state, so an aborted run poisoned the next run
+      (the W42 entry stayed flagged → the trigger correctly sent *no* new
+      notification → the test failed far away from the cause, and `_until`'s
+      silent timeout surfaced as an unrelated finder error, because
+      `describeMismatch` reads `found` on a never-evaluated finder). It now
+      (a) resets its own precondition through the API (re-saves Zeynep as
+      `NEUTRAL` before flagging, so the flag is always a genuine new-flag
+      transition), (b) takes its baseline unread count from the API and
+      asserts *relative* changes, (c) locates the row by title **and** the
+      `Yeni` marker so leftover rows can't hijack the tap, and (d) uses
+      `_untilOrFail`, which throws a named `TestFailure` instead of polling
+      out quietly. Verified by running it twice back-to-back with no manual DB
+      cleanup. Pull-to-refresh itself is tested with a sequenced stub
+      repository rather than live HTTP — a fling can't settle under
+      `flutter_test`'s fake async.
+    - Residual test data: the API has no delete endpoint, so runs leave read
+      notification rows and the neutralised W42 entry behind. They don't
+      affect assertions (all relative), but the demo inbox fills up over
+      time — worth a `DELETE`-by-owner endpoint or a retention job later.
+  - **Deviations:** (1) `parentIdsForStudent()` was added to `UsersService`
+    because report fan-out needs the **child → parents** direction;
+    `linkedStudentIds()` (parent → children, used by weekly summaries) is the
+    wrong direction. Both live in `UsersModule` so the `parent_student` join
+    table stays owned by one module. (2) No background delivery, no retry
+    queue, no notification preferences/scheduler, no counselor/admin fan-out —
+    out of scope this phase. (3) Notification list is
+    `SingleChildScrollView + Column` like the other screens, to keep rows
+    findable in widget tests. (4) `FLAG_REASON_LABELS` (TR copy, e.g.
+    `behavior_severe` → `şiddetli davranış`) was added to
+    `src/reports/flagging.ts` rather than `notifications/`, keeping the
+    labels next to the reason values that produce them.
 
 ### Phase 3: Device layer — screen time & limits — [STATUS: not started]
 - Kotlin module: Usage Stats, foreground service, overlay for blocking.
@@ -462,3 +593,24 @@ correctly targeted.
   and removed in v7 — before any Prisma major bump, migrate to
   `prisma.config.ts`. Boot logs already warn about it. Not urgent while
   pinned to v6.
+- **Background push delivery (Phase 5 hardening, not Phase 2c):** the current
+  client only streams ntfy while the app is in the foreground. Without a
+  UnifiedPush distributor app (or FCM) nothing wakes the app, so a flag saved
+  while the parent has the app closed produces no push — the row waits in the
+  inbox until next launch. Re-evaluate at pilot start: on stock Android,
+  battery-optimiser behaviour of the ntfy receiver is the deciding factor for
+  whether foreground-only is good enough.
+- **ntfy topic security (revisit before any public exposure):** topics are
+  unguessable 48-hex values, but the ntfy instance is unauthenticated —
+  anyone holding a topic can publish into it or read its stream. Acceptable
+  for the pilot because a topic is only ever returned to its own user by
+  `POST /notifications/subscribe` and never rendered in the UI. Before
+  exposing the VPS publicly: put an ntfy access token / per-topic ACLs in
+  front of it (nginx `auth_basic` or ntfy's own `auth-file`), and terminate
+  HTTPS (see the domain/certbot item above).
+- **FCM swap-in path (documented, not built):** if pilot delivery proves too
+  flaky, implement `PushTransport` with FCM and rebind the `PUSH_TRANSPORT`
+  token in `NotificationsModule` — `NotificationsService` and every caller stay
+  unchanged. A real FCM transport would need per-device registration tokens
+  (currently `push_subscriptions.platform` is free-form) and a background
+  handler in the Flutter app.

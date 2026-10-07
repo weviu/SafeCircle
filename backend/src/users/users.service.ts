@@ -29,4 +29,15 @@ export class UsersService {
     });
     return links.map((link) => link.studentId);
   }
+
+  /** Inverse of [linkedStudentIds]: parent ids linked to this student via
+   * `parent_student` (public API — used by the report-flag notification
+   * trigger to find a student's recipients). */
+  async parentIdsForStudent(studentId: string): Promise<string[]> {
+    const links = await this.prisma.parentStudent.findMany({
+      where: { studentId },
+      select: { parentId: true },
+    });
+    return links.map((link) => link.parentId);
+  }
 }

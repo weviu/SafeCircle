@@ -17,6 +17,14 @@ export const STREAK_LENGTH = 3;
 export const FLAGGED_BEHAVIORS: readonly Behavior[] = [Behavior.CONCERN, Behavior.SEVERE];
 export const ABSENT_LIKE: readonly Attendance[] = [Attendance.ABSENT, Attendance.LATE];
 
+/** Turkish labels for flag reasons — used in the parent notification copy. */
+export const FLAG_REASON_LABELS: Record<string, string> = {
+  behavior_severe: 'şiddetli davranış',
+  behavior_concern: 'uyarı davranışı',
+  absence_streak: 'devamsızlık şeridi',
+  homework_streak: 'ödev şeridi',
+};
+
 /**
  * Flags are evaluated once, when an entry is written (created or edited).
  * Later rule changes do not backfill existing rows — acceptable for the pilot.

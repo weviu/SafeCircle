@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../notifications/notification_bell.dart';
+import '../notifications/notifications_providers.dart';
 import '../providers.dart';
 import '../reports/iso_week.dart';
 import '../reports/report_values.dart';
@@ -24,6 +28,7 @@ class _ParentHomeState extends ConsumerState<ParentHome> {
   @override
   void initState() {
     super.initState();
+    unawaited(ref.read(pushControllerProvider).startSession());
     final today = dateOnly(DateTime.now());
     _weekStart = today.subtract(Duration(days: today.weekday - 1));
     _load();
@@ -75,7 +80,10 @@ class _ParentHomeState extends ConsumerState<ParentHome> {
     final students = summary?.students ?? const <SummaryStudent>[];
     final anyData = students.any((student) => student.hasData);
     return Scaffold(
-      appBar: AppBar(title: const Text('Haftalık Özet')),
+      appBar: AppBar(
+        title: const Text('Haftalık Özet'),
+        actions: const [NotificationBell()],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
