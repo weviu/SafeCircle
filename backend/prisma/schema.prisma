@@ -1,0 +1,198 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PARENT
+  TEACHER
+  COUNSELOR
+  ADMIN
+}
+
+enum Attendance {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+enum Homework {
+  DONE
+  PARTIAL
+  NOT_DONE
+  NOT_GIVEN
+}
+
+enum Behavior {
+  POSITIVE
+  NEUTRAL
+  CONCERN
+  SEVERE
+}
+
+enum NotificationType {
+  REPORT_FLAG
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         Role
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  parentStudents   ParentStudent[]
+  teacherClasses   TeacherClass[]
+  counselorSchools CounselorSchool[]
+  refreshTokens    RefreshToken[]
+  reportEntries    ReportEntry[]
+  notifications    Notification[]
+  pushSubscriptions PushSubscription[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  tokenHash String    @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("refresh_tokens")
+}
+
+model School {
+  id   String @id @default(cuid())
+  name String
+
+  classes          Class[]
+  counselorSchools CounselorSchool[]
+
+  @@map("schools")
+}
+
+model Class {
+  id       String @id @default(cuid())
+  schoolId String @map("school_id")
+  name     String
+  grade    String
+
+  school   School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  students Student[]
+  teachers TeacherClass[]
+
+  @@index([schoolId])
+  @@map("classes")
+}
+
+model Student {
+  id           String @id @default(cuid())
+  classId      String @map("class_id")
+  name         String
+  schoolNumber String @map("school_number")
+
+  class   Class           @relation(fields: [classId], references: [id], onDelete: Cascade)
+  parents ParentStudent[]
+  reportEntries ReportEntry[]
+
+  @@index([classId])
+  @@map("students")
+}
+
+model ParentStudent {
+  parent    User    @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  parentId  String  @map("parent_id")
+  studentId String  @map("student_id")
+
+  @@id([parentId, studentId])
+  @@index([studentId])
+  @@map("parent_student")
+}
+
+model TeacherClass {
+  teacher  User   @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  class    Class  @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacherId String @map("teacher_id")
+  classId   String @map("class_id")
+
+  @@id([teacherId, classId])
+  @@index([classId])
+  @@map("teacher_class")
+}
+
+model CounselorSchool {
+  counselor User   @relation(fields: [counselorId], references: [id], onDelete: Cascade)
+  school    School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  counselorId String @map("counselor_id")
+  schoolId    String @map("school_id")
+
+  @@id([counselorId, schoolId])
+  @@index([schoolId])
+  @@map("counselor_school")
+}
+
+model ReportEntry {
+  id         String     @id @default(cuid())
+  studentId  String     @map("student_id")
+  authorId   String     @map("author_id")
+  reportDate DateTime   @map("report_date") @db.Date
+  attendance Attendance
+  homework   Homework
+  behavior   Behavior
+  note       String?
+  flagged    Boolean    @default(false)
+  flagReason String?    @map("flag_reason")
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  author  User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, authorId, reportDate])
+  @@index([reportDate])
+  @@index([authorId])
+  @@map("report_entries")
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String           @map("user_id")
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?        @map("read_at")
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+model PushSubscription {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  topic      String    @unique
+  platform   String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastSeenAt DateTime? @map("last_seen_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
+}

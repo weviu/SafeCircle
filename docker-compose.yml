@@ -8,6 +8,20 @@ services:
       postgres:
         condition: service_healthy
 
+  ntfy:
+    # Self-hosted push. Pinned to an exact version (no latest). Published via
+    # the internal network only — reachable from outside through Nginx's
+    # /ntfy/ location (no host port is published). --behind-proxy makes it
+    # trust X-Forwarded-For from nginx.
+    image: binwiederhier/ntfy:v2.28.0
+    command: serve --behind-proxy
+    environment:
+      # Match NTFY_BASE_URL / nginx proxy target (ntfy's default port is 80).
+      NTFY_LISTEN_HTTP: ":2586"
+    volumes:
+      - ntfy_data:/var/lib/ntfy
+    restart: unless-stopped
+
   postgres:
     image: postgres:17
     volumes:
@@ -30,6 +44,8 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - api
+      - ntfy
 
 volumes:
   pgdata:
+  ntfy_data:

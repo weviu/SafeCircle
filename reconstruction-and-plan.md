@@ -59,7 +59,8 @@ Claude directly in chat — using a worker agent for implementation, with Claude
 - **Reverse proxy: Nginx** (not Caddy — no domain yet; user has and uses
   certbot). HTTPS/certbot to be added later once a domain is acquired. For now,
   Nginx proxies plain HTTP on the VPS IP.
-- **Containerization:** Docker Compose. Services: `api`, `postgres`, `nginx`.
+- **Containerization:** Docker Compose. Services: `api`, `postgres`, `nginx`,
+  plus **`ntfy`** (self-hosted push, added Phase 2c).
 - **Postgres:** current stable, version pinned in compose (e.g. `postgres:17`),
   named volume for data persistence (`pgdata`) — never use ephemeral storage.
 - **Secrets:** `.env` file, gitignored from first commit, never hardcoded.
@@ -121,6 +122,15 @@ students (id, class_id, name, school_number)
 parent_student   (parent_id, student_id)      -- many:many join table
 teacher_class    (teacher_id, class_id)        -- many:many join table
 counselor_school (counselor_id, school_id)     -- many:many join table
+```
+
+Phase 2 additions (extend, don't redesign):
+
+```
+notifications (id, user_id, type, title, body, data_jsonb, read_at, created_at)
+  type: enum [report_flag]
+push_subscriptions (id, user_id, platform, topic, created_at, last_seen_at)
+  -- one row per (user, platform); topic is server-generated and reused
 ```
 
 Rule for extending this later: **new relationship = new join table**, never a
@@ -212,33 +222,312 @@ raised to the user first.
      `server_name` vhost on 80/443, or move the system Nginx out of the way.
    - Dockerfile uses `npm ci` (lockfile-exact installs) for reproducibility.
 
-### Phase 1: Core backend + data — [STATUS: not started]
+### Phase 1: Core backend + data — [STATUS: done]
 5. NestJS project scaffolded in `/backend`, module folders created:
-   `auth/`, `users/`, `schools/`.
-6. Prisma installed, `schema.prisma` written per data model above.
-7. First migration run (`prisma migrate dev`), tables confirmed in Postgres.
+   `auth/`, `users/`, `schools/`. ✅
+6. Prisma installed, `schema.prisma` written per data model above. ✅
+   - Prisma pinned to stable v6 (`^6.19.3`); v7/v8 are newer majors with
+     changed generator/engine defaults — revisit deliberately later.
+7. First migration run (`prisma migrate dev`), tables confirmed in Postgres. ✅
+   - `20261007084616_init/migration.sql` committed: 8 tables (`users`,
+     `refresh_tokens`, `schools`, `classes`, `students`, `parent_student`,
+     `teacher_class`, `counselor_school`), join tables use
+     composite PKs, all FKs `ON DELETE CASCADE`, no extra tables/columns.
+   - **Workflow (decision):** Postgres publishes no host port (Phase 0), so new
+     migrations are generated in a throwaway container:
+     `docker compose run --rm --entrypoint "" -v ./backend/prisma:/app/prisma api npx prisma migrate dev --name <name>`
+     The api entrypoint runs `migrate deploy` + `db seed` before `node
+     dist/main.js`, so a fresh `down -v && up --build` ends with schema +
+     seed data and no manual steps.
 8. Auth module: signup/login, argon2 hashing, JWT (1-day expiry) + refresh
-   token, NestJS guards keyed on `role`.
+   token, NestJS guards keyed on `role`. ✅
+   - Refresh tokens: opaque 48-byte random, sha256-hashed, 30-day TTL,
+     rotated on use; presenting a revoked token revokes the whole family.
+     Returned in the response body (no cookies).
+   - `@Public()` on login/signup/refresh/health; **logout requires a Bearer
+     token** (deliberately not on the public list).
+   - **Deviation recorded (accepted):** signup validates `name` but does not
+     persist it — the data model has no name column on `users`. Revisit via
+     migration when a display name is actually needed.
+   - `tsx` and `prisma` both sit in `dependencies`, not devDependencies: the
+     production image must run `prisma migrate deploy` and `prisma db seed`
+     from `docker-entrypoint.sh`, and `NODE_ENV=production` omits devDeps.
+     (`prisma` reaches the image via `@prisma/client`'s peer dep either way,
+     but declaring it explicitly keeps the boot-critical path from depending
+     on peer auto-install behavior.)
+   - No `PrismaModule` (kept to auth/users/schools): `PrismaService` is
+     provided directly by AuthModule and UsersModule.
 9. Seed script (Prisma seed) creating a test school/class/students — this is
-   the stand-in "admin panel" until a real one is built.
+   the stand-in "admin panel" until a real one is built. ✅
+   - Idempotent (upsert by natural key): 1 admin, 1 school, 2 classes,
+     6 students, 1 counselor, 2 teachers, 3 parents.
 
-### Phase 1.5: Flutter skeleton — [STATUS: not started]
+### Phase 1.5: Flutter skeleton — [STATUS: done]
 10. Flutter project scaffolded in `/app`, `riverpod` + `go_router` + `dio`
-    added.
+    added. ✅ (also `shared_preferences` for token storage — **deviation
+    recorded: plaintext prefs, not secure storage; move to
+    `flutter_secure_storage`/Keystore during Phase 5 hardening, not before**)
 11. `go_router` set up with role-based redirect (unauthenticated → login;
-    authenticated → role-specific home).
-12. `dio` client: base URL from config, interceptor attaching JWT, handling
-    401 (refresh or logout).
-13. **Milestone:** one real end-to-end screen — login → `POST /auth/login` →
-    token stored → redirect to placeholder home showing `Hello, {role}`. This
-    is the Phase 0/1 "done" marker. Don't proceed to Phase 2 features until
-    this works cleanly.
+    authenticated → role-specific home `/parent|/teacher|/counselor|/admin`;
+    another role's home is rejected). ✅
+12. `dio` client: base URL from `--dart-define=API_BASE_URL` (default
+    `http://localhost:8080`), interceptor attaching JWT, handling 401
+    (single-flight refresh → retry once, else clear session → login). ✅
+13. **Milestone:** login screen → `POST /auth/login` → tokens stored →
+    redirect to placeholder home showing `Hello, {role}`. ✅
+    - **Verification (deviation, accepted):** no Android SDK or Chrome in
+      this environment, so the end-to-end proof is `flutter test` —
+      widget tests driving the real screens against the real compose
+      stack (real signup/login/refresh HTTP; flutter_test stubs HTTP with
+      400s by default, cleared via `HttpOverrides.global = null`), plus
+      4 plain-Dart API/interceptor tests. All 6 pass; `flutter build
+      linux` also succeeds. `android/` is scaffolded and ready once the
+      SDK is installed (required from Phase 3 device work).
+    - `linux/` target added purely as a local dev harness, no product scope.
 
-### Phase 2: School-side reporting — [STATUS: not started]
+### Phase 2: School-side reporting — [STATUS: done]
 - Teacher input screens (attendance/homework/behavior), rule-based flagging
-  (no AI yet), parent weekly summary view, FCM push notifications.
+  (no AI yet), parent weekly summary view, push notifications (originally
+  listed as FCM — dropped in favor of a no-third-party approach, see the
+  "Push transport" note below).
 - This phase is demoable with no device-level Android code — good checkpoint
   to show the pilot school before Phase 3/4 complexity.
+- **Verification note (2026-10-07, backend scope only):**
+  - **Schema/migration:** `report_entries` table + `Attendance`/`Homework`/
+    `Behavior` enums via `prisma migrate dev --name reporting`
+    (`backend/prisma/migrations/20261007111140_reporting/migration.sql`);
+    unique `(studentId, authorId, reportDate)`, indexes on `reportDate`,
+    `authorId`; FK cascade to `students`/`users`. Verified from-scratch
+    `down -v && up --build`: both migrations apply, seed prints
+    `Report entries: 60 created, 4 newly flagged`, `/health` → `{"status":"ok"}`.
+  - **Flagging:** one pure function `src/reports/flagging.ts` (rules:
+    `behavior_severe|behavior_concern` → `absence_streak` (≥3 consecutive
+    Mon–Fri school days all ABSENT/LATE, student-wide) → `homework_streak`
+    (≥3 consecutive entries all NOT_DONE)). 23/23 offline unit checks passed
+    (`/tmp/opencode/check-phase2.ts`). Flags computed at write time only —
+    later rule changes won't backfill (documented, accepted for pilot).
+  - **Endpoints (all curl-verified against live nginx stack, full transcript
+    `/tmp/opencode/phase2-verify.log`, 46 requests):**
+    `POST /reports/entries` 201 + re-POST same ids (upsert, no dupes);
+    400 invalid enum / duplicate studentId / empty entries / bad week;
+    401 no token; 403 parent/counselor/admin on POST, parent on
+    `GET entries`+`summaries`+`flagged`, teacher2 on teacher1's class
+    (GET + non-author PATCH), counselor/teacher on `summaries`;
+    404 unknown studentId/classId/entryId; `GET entries` 200/`[]`;
+    `PATCH entries/:id` re-flags both directions (Zeynep 09-25
+    ABSENT→PRESENT clears `absence_streak`, Ayşe 09-28 DONE→NOT_DONE
+    creates `homework_streak`, both restored);
+    `GET summaries?week=2026-W39` parent1 → exactly 2 children with
+    zero-filled counts + notes, parent2 → Zeynep `flaggedCount: 1`;
+    default week = current ISO week, zero-filled;
+    `GET flagged` scoped: teacher1 → 1 entry/week (class A only),
+    teacher2 → class B only, counselor → both, admin → both, each with
+    hydrated `student{name}` + `author{email}` via UsersService.
+  - **Idempotency:** container restart → `0 created, 60 skipped`;
+    second `down -v && up --build` → identical `60/4` state.
+  - **Build/tests:** `npm run build` clean; `npx tsc --noEmit` clean;
+    `git status` shows only `backend/` changes (no `app/` touched).
+  - **Deviations:** (1) `SchoolsService` has 6 methods, not 4 — split
+    `findByIds` into `classesByIds`/`studentsByIds` + added
+    `studentsInSchool` for counselor scoping; no queries cross into
+    `schools`/`classes`/`students` tables from `reports/`. **Review fix
+    (overser):** `reports/` originally queried the `parent_student` join
+    directly — now goes through `UsersService.linkedStudentIds()` so the
+    boundary rule holds uniformly (join tables are reached only via the
+    owning module's public service).
+    (2) `backend/Dockerfile` now copies whole `src/` into the production
+    image (was only `src/generated/prisma`) so `tsx prisma/seed.ts` can
+    import the flagging module on boot.
+    (3) FCM push notifications and Flutter teacher/parent screens from the
+    phase description are **not** in this step (explicitly backend-only
+    scope); they remain open for the next step of Phase 2.
+  - **Known demo-data caveat:** seeded report entries use fixed past dates
+    (2026-W39/W40), so the default "current ISO week" summary is empty.
+    The Flutter screens task must pick a week that has data (or seed the
+    current week) — otherwise the pilot demo shows all-zero summaries.
+    **Resolved in the app step below via week/day arrow navigation.**
+  - **Verification note (2026-10-07, app + step-1 backend scope):**
+    - **Step-1 endpoints:** `GET /classes` and `GET /classes/:id/students`
+      (SchoolsController, SchoolsService) — teacher gets own classes with
+      `school{id,name}`, admin all classes, counselor/parent 403, no token
+      401; students ordered by school number; 404 unknown class, 403 foreign
+      class (teacher2 on class A). ReportsService.`requireOwnedClass`
+      delegates to SchoolsService.`requireClassAccess` so the ownership rule
+      is defined once. Curl transcript (12 cases + regressions):
+      `/tmp/opencode/phase2b-classes-curl.log`.
+    - **Flutter (`app/lib`):** `reports/{classes_repository,
+      reports_repository}.dart` (lists/creates entries, weekly summaries),
+      `reports/iso_week.dart` (ISO-8601 weeks, `yyyy-MM-dd`), `reports/
+      report_values.dart` (TR labels), `reports/reports_models.dart`;
+      `screens/teacher_home.dart` (day arrows, per-student SegmentedButtons,
+      per-student **Öğretmen notu** TextField — maxLines 2 / maxLength 500,
+      prefilled from GET /reports/entries — Kaydet → flag chip after save),
+      `screens/parent_home.dart` (week arrows, week-level empty state + demo
+      hint when *no* child has data, `İşaretli: N` badges; **all** linked
+      children are rendered, a child without records showing "Bu hafta için
+      kayıt yok" inside its card),
+      `screens/home_screen.dart` → `PlaceholderHome` for counselor/admin,
+      `router.dart` maps `/teacher`→TeacherHome, `/parent`→ParentHome,
+      `/counselor|/admin`→placeholder.
+    - **Fix round (2026-10-07, Phase 2b — note + child visibility):**
+      - **Note-clearing semantics:** `_EntryDraft` gained `note`; the payload
+        builder sends an empty/whitespace-only note as an *absent* `note`
+        field (`EntryPayload.toJson` omits `note` when null), which
+        `CreateReportDto` stores as NULL via `note: input.note ?? null` —
+        the variant that lets a teacher clear a note. A literal empty string
+        would be persisted as `''` (not cleared), so it is never sent.
+        The teacher test round-trips this: types "Randevu gerekli" on
+        2026-09-28 → submit → `GET /reports/entries` shows it → clears the
+        field → re-submit → `GET` shows NULL → restore seed (DONE, note NULL).
+      - **Parent child visibility:** the `hasData` filter is gone — **every
+        linked child always renders.** A child with no records shows
+        "Bu hafta için kayıt yok" inside its own card; when *no* child has
+        data, a single demo-data hint line is appended below the cards
+        (overser fix: the intermediate version hid all cards in that case,
+        which reproduced the exact "no records vs not linked" ambiguity the
+        fix was for). Covered by a
+        repository-stubbed widget test (data child + record-less child in the
+        same week) — the seeded W39 data always
+        gives both children records, so the inline branch needs the stub.
+      - Trailing newline restored at EOF of `home_screen.dart`.
+      - `flutter analyze` clean; 11/11 tests pass live; `flutter build linux`
+        green. Changes limited to `app/` (no backend/packages).
+    - **Deviations:** (1) the login-screen E2E user (`flutter-e2e@test.local`)
+      owns no class, so its test now asserts the TeacherHome *empty state*
+      (`Atandığınız sınıf yok`) instead of a class label; the seed teacher
+      flow lives in `reports_test.dart`. (2) screens use
+      `SingleChildScrollView + Column` (not lazy lists) so off-screen rows
+      stay findable in widget tests. (3) no new pubspec packages. Counselors
+      get the placeholder because only their `GET /reports/flagged`
+      endpoint is in Phase 2 scope — the counselor screen is Phase 4.
+  - **Push transport (decision locked 2026-10-07, Phase 2c):** no Firebase/FCM
+    — user wants no third-party dependencies. Locked design:
+    - `notifications` + `push_subscriptions` tables; the inbox row is the
+      source of truth, push is best-effort decoration on top.
+    - A `PushTransport` interface behind an `PUSH_TRANSPORT` DI token, with
+      `NtfyTransport` (HTTP) and `LogOnlyPushTransport` (no config). FCM
+      remains a drop-in: implement the same interface and rebind the token —
+      no caller changes.
+    - Self-hosted **ntfy v2.28.0** as a compose service, proxied by nginx.
+    - **Android background push without Google is not solvable this phase.**
+      The client subscribes to an ntfy JSON stream while the app is in the
+      foreground; there is no UnifiedPush, no FCM, no wake-from-background.
+      The counselor's "call parent now" stays the real escalation path.
+    - **Security limitation (accepted for pilot):** topics are unguessable 48-hex
+      values but ntfy itself is unauthenticated — anyone holding a topic can
+      publish into it or read it. Acceptable only because the topic never
+      leaves the app's own API response; hard-code an ntfy access token /
+      per-topic ACLs before any public exposure.
+    - `NTFY_BASE_URL` empty/unset ⇒ `LogOnlyPushTransport`, so local dev and
+      tests never need ntfy running.
+
+- **Verification note (2026-10-07, Phase 2c — notifications + push):**
+  - **Schema/migration:** `NotificationType` (`REPORT_FLAG`), `Notification`,
+    `PushSubscription` + `User.notifications`/`pushSubscriptions` relations via
+    `prisma migrate dev --name notifications`
+    (`backend/prisma/migrations/20261007135939_notifications/migration.sql`);
+    `push_subscriptions` carries `topic` as `@unique` plus a plain
+    `@@index([userId])` — deliberately **no** unique index on
+    `(userId, platform)`, because `platform` is nullable and Postgres treats
+    NULLs as distinct, so it could not enforce "one subscription per
+    (user, platform)" anyway. Uniqueness of the topic is the integrity net;
+    `ensureSubscription` does `findFirst` then `create`. See deviations.
+    Verified from-scratch `down -v && up --build`: all three migrations
+    apply, seed prints 60 report entries, `prisma migrate status` →
+    "Database schema is up to date!", `/health` → `{"status":"ok"}`.
+  - **Backend module** `src/notifications/`: `NotificationsController`
+    (Bearer-authenticated, no `@Public`/`@Roles`), `NotificationsService`,
+    `PushTransport`/`NtfyTransport`/`LogOnlyPushTransport` behind the
+    `PUSH_TRANSPORT` token. Endpoints (all curl-verified):
+    `GET /notifications?limit=` → `{items[], unreadCount}`,
+    `POST /notifications/:id/read` → 201, **404 when the row is another user's**
+    (verified cross-user), `POST /notifications/read-all` → `{ok, updated}`,
+    `POST /notifications/subscribe` → `{topic}`, server-generated
+    `sc_` + 48 hex chars, **stable per (user, platform)** (verified: two
+    consecutive calls return the same topic), `lastSeenAt` bumped on reuse.
+  - **Trigger:** `ReportsService` notifies a student's parents
+    (`UsersService.parentIdsForStudent()`) only when the entry is newly
+    flagged **or** the flag reason changed — verified: identical re-POST →
+    still 1 notification; `behavior_severe` → `behavior_concern` → 2.
+    Inbox write happens **before** fan-out, so the report POST still returns
+    201 when push is broken (verified with `NTFY_BASE_URL=http://127.0.0.1:9`:
+    201 + row persisted + log line
+    `push publish failed for topic sc_…: fetch failed` + `/health` 200).
+    Cross-user scoping verified: a flag for Zeynep appears for `parent2` and
+    `parent1`'s inbox stays empty.
+  - **ntfy wiring:** compose service `ntfy` (v2.28.0, volume `ntfy_data`),
+    nginx `location /ntfy/ { proxy_pass http://ntfy:2586/; … buffering off }`.
+    **Deviation recorded (accepted):** the phase plan wrote `/ntfy/{topic}`,
+    but ntfy ≥2 requires the **explicit format suffix** — the client
+    subscribes to `GET /ntfy/{topic}/json` (newline-delimited JSON) and
+    publishing stays `POST /ntfy/{topic}`. Bare `/ntfy/{topic}` is only a
+    topic-info document, not a stream.
+    **Overseer (accepted):** `nginx.depends_on: ntfy` stays. The "no other
+    compose changes" line was so `api` would not depend on ntfy (publish
+    failures stay non-fatal — still true). Nginx's literal
+    `proxy_pass http://ntfy:2586/` resolves the upstream at start; without
+    `depends_on`, a parallel `up` can fail to resolve `ntfy` and nginx exits.
+  - **Flutter (`app/lib`):** `notifications/` — `notifications_models.dart`,
+    `notifications_repository.dart`, `ntfy_events.dart` (chunk-safe
+    line-buffered parser: partial lines are held in a remainder, `open`/
+    `keepalive` housekeeping and garbage are dropped),
+    `push_controller.dart` (dio stream on `/ntfy/{topic}/json`, exponential
+    reconnect, refreshes the unread count), `notifications_providers.dart`,
+    `notification_bell.dart` (AppBar bell + unread Badge);
+    `screens/notifications_screen.dart` (inbox, tap-to-read, "Tümünü okundu
+    işaretle", **pull-to-refresh** keeping the current rows visible while
+    re-fetching — the empty state is a `ListView` with
+    `AlwaysScrollableScrollPhysics` so it stays pullable, Turkish
+    empty/error states); teacher/parent homes start the
+    session in `initState` and show the bell; router allows `/notifications`
+    for parent+teacher roles only. **No new pubspec packages.**
+    - Riverpod note: `ChangeNotifierProvider` now lives in
+      `package:flutter_riverpod/legacy.dart` (Riverpod 3.x) and the provider
+      **auto-disposes its notifier** — do not add `ref.onDispose(c.dispose)`
+      (double-dispose crash: "A PushController was used after being disposed").
+      Stub-based widget tests must override `notificationsRepositoryProvider`,
+      not the notifier provider (`overrideWithValue` doesn't exist on it).
+  - **Tests (19/19 green, `flutter analyze` clean, `flutter build linux`
+    green, re-verified after a full `docker compose down -v && up --build`):**
+    6 parser unit tests + 1 stubbed pull-to-refresh widget test
+    (`test/notifications_test.dart`); one live widget test in
+    `test/reports_test.dart` drives the real stack — teacher flags Zeynep
+    on 2026-10-12 via the API while the parent app is mounted, asserts the
+    bell badge appears, opens the inbox, checks the row, taps it and asserts
+    the backend unread count drops by one. It uses **2026-10-12 (W42)**
+    because the W41 empty-state test must keep seeing an empty week.
+    - **Test hardening (2026-10-07):** the live test used to assume an empty
+      inbox and a clean flag state, so an aborted run poisoned the next run
+      (the W42 entry stayed flagged → the trigger correctly sent *no* new
+      notification → the test failed far away from the cause, and `_until`'s
+      silent timeout surfaced as an unrelated finder error, because
+      `describeMismatch` reads `found` on a never-evaluated finder). It now
+      (a) resets its own precondition through the API (re-saves Zeynep as
+      `NEUTRAL` before flagging, so the flag is always a genuine new-flag
+      transition), (b) takes its baseline unread count from the API and
+      asserts *relative* changes, (c) locates the row by title **and** the
+      `Yeni` marker so leftover rows can't hijack the tap, and (d) uses
+      `_untilOrFail`, which throws a named `TestFailure` instead of polling
+      out quietly. Verified by running it twice back-to-back with no manual DB
+      cleanup. Pull-to-refresh itself is tested with a sequenced stub
+      repository rather than live HTTP — a fling can't settle under
+      `flutter_test`'s fake async.
+    - Residual test data: the API has no delete endpoint, so runs leave read
+      notification rows and the neutralised W42 entry behind. They don't
+      affect assertions (all relative), but the demo inbox fills up over
+      time — worth a `DELETE`-by-owner endpoint or a retention job later.
+  - **Deviations:** (1) `parentIdsForStudent()` was added to `UsersService`
+    because report fan-out needs the **child → parents** direction;
+    `linkedStudentIds()` (parent → children, used by weekly summaries) is the
+    wrong direction. Both live in `UsersModule` so the `parent_student` join
+    table stays owned by one module. (2) No background delivery, no retry
+    queue, no notification preferences/scheduler, no counselor/admin fan-out —
+    out of scope this phase. (3) Notification list is
+    `SingleChildScrollView + Column` like the other screens, to keep rows
+    findable in widget tests. (4) `FLAG_REASON_LABELS` (TR copy, e.g.
+    `behavior_severe` → `şiddetli davranış`) was added to
+    `src/reports/flagging.ts` rather than `notifications/`, keeping the
+    labels next to the reason values that produce them.
 
 ### Phase 3: Device layer — screen time & limits — [STATUS: not started]
 - Kotlin module: Usage Stats, foreground service, overlay for blocking.
@@ -300,3 +589,28 @@ correctly targeted.
 - AI/LLM integration for report generation and risk flagging — deferred
   until Phase 2 rule-based flagging is working and the team wants to improve
   on it.
+- Prisma 7 upgrade: `package.json#prisma` (the seed config) is deprecated
+  and removed in v7 — before any Prisma major bump, migrate to
+  `prisma.config.ts`. Boot logs already warn about it. Not urgent while
+  pinned to v6.
+- **Background push delivery (Phase 5 hardening, not Phase 2c):** the current
+  client only streams ntfy while the app is in the foreground. Without a
+  UnifiedPush distributor app (or FCM) nothing wakes the app, so a flag saved
+  while the parent has the app closed produces no push — the row waits in the
+  inbox until next launch. Re-evaluate at pilot start: on stock Android,
+  battery-optimiser behaviour of the ntfy receiver is the deciding factor for
+  whether foreground-only is good enough.
+- **ntfy topic security (revisit before any public exposure):** topics are
+  unguessable 48-hex values, but the ntfy instance is unauthenticated —
+  anyone holding a topic can publish into it or read its stream. Acceptable
+  for the pilot because a topic is only ever returned to its own user by
+  `POST /notifications/subscribe` and never rendered in the UI. Before
+  exposing the VPS publicly: put an ntfy access token / per-topic ACLs in
+  front of it (nginx `auth_basic` or ntfy's own `auth-file`), and terminate
+  HTTPS (see the domain/certbot item above).
+- **FCM swap-in path (documented, not built):** if pilot delivery proves too
+  flaky, implement `PushTransport` with FCM and rebind the `PUSH_TRANSPORT`
+  token in `NotificationsModule` — `NotificationsService` and every caller stay
+  unchanged. A real FCM transport would need per-device registration tokens
+  (currently `push_subscriptions.platform` is free-form) and a background
+  handler in the Flutter app.
