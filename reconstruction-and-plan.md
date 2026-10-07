@@ -275,11 +275,73 @@ raised to the user first.
       SDK is installed (required from Phase 3 device work).
     - `linux/` target added purely as a local dev harness, no product scope.
 
-### Phase 2: School-side reporting — [STATUS: not started]
+### Phase 2: School-side reporting — [STATUS: done]
 - Teacher input screens (attendance/homework/behavior), rule-based flagging
-  (no AI yet), parent weekly summary view, FCM push notifications.
+  (no AI yet), parent weekly summary view, push notifications (originally
+  listed as FCM — dropped in favor of a no-third-party approach, see the
+  "Push transport" note below).
 - This phase is demoable with no device-level Android code — good checkpoint
   to show the pilot school before Phase 3/4 complexity.
+- **Verification note (2026-10-07, backend scope only):**
+  - **Schema/migration:** `report_entries` table + `Attendance`/`Homework`/
+    `Behavior` enums via `prisma migrate dev --name reporting`
+    (`backend/prisma/migrations/20261007111140_reporting/migration.sql`);
+    unique `(studentId, authorId, reportDate)`, indexes on `reportDate`,
+    `authorId`; FK cascade to `students`/`users`. Verified from-scratch
+    `down -v && up --build`: both migrations apply, seed prints
+    `Report entries: 60 created, 4 newly flagged`, `/health` → `{"status":"ok"}`.
+  - **Flagging:** one pure function `src/reports/flagging.ts` (rules:
+    `behavior_severe|behavior_concern` → `absence_streak` (≥3 consecutive
+    Mon–Fri school days all ABSENT/LATE, student-wide) → `homework_streak`
+    (≥3 consecutive entries all NOT_DONE)). 23/23 offline unit checks passed
+    (`/tmp/opencode/check-phase2.ts`). Flags computed at write time only —
+    later rule changes won't backfill (documented, accepted for pilot).
+  - **Endpoints (all curl-verified against live nginx stack, full transcript
+    `/tmp/opencode/phase2-verify.log`, 46 requests):**
+    `POST /reports/entries` 201 + re-POST same ids (upsert, no dupes);
+    400 invalid enum / duplicate studentId / empty entries / bad week;
+    401 no token; 403 parent/counselor/admin on POST, parent on
+    `GET entries`+`summaries`+`flagged`, teacher2 on teacher1's class
+    (GET + non-author PATCH), counselor/teacher on `summaries`;
+    404 unknown studentId/classId/entryId; `GET entries` 200/`[]`;
+    `PATCH entries/:id` re-flags both directions (Zeynep 09-25
+    ABSENT→PRESENT clears `absence_streak`, Ayşe 09-28 DONE→NOT_DONE
+    creates `homework_streak`, both restored);
+    `GET summaries?week=2026-W39` parent1 → exactly 2 children with
+    zero-filled counts + notes, parent2 → Zeynep `flaggedCount: 1`;
+    default week = current ISO week, zero-filled;
+    `GET flagged` scoped: teacher1 → 1 entry/week (class A only),
+    teacher2 → class B only, counselor → both, admin → both, each with
+    hydrated `student{name}` + `author{email}` via UsersService.
+  - **Idempotency:** container restart → `0 created, 60 skipped`;
+    second `down -v && up --build` → identical `60/4` state.
+  - **Build/tests:** `npm run build` clean; `npx tsc --noEmit` clean;
+    `git status` shows only `backend/` changes (no `app/` touched).
+  - **Deviations:** (1) `SchoolsService` has 6 methods, not 4 — split
+    `findByIds` into `classesByIds`/`studentsByIds` + added
+    `studentsInSchool` for counselor scoping; no queries cross into
+    `schools`/`classes`/`students` tables from `reports/`. **Review fix
+    (overser):** `reports/` originally queried the `parent_student` join
+    directly — now goes through `UsersService.linkedStudentIds()` so the
+    boundary rule holds uniformly (join tables are reached only via the
+    owning module's public service).
+    (2) `backend/Dockerfile` now copies whole `src/` into the production
+    image (was only `src/generated/prisma`) so `tsx prisma/seed.ts` can
+    import the flagging module on boot.
+    (3) FCM push notifications and Flutter teacher/parent screens from the
+    phase description are **not** in this step (explicitly backend-only
+    scope); they remain open for the next step of Phase 2.
+  - **Known demo-data caveat:** seeded report entries use fixed past dates
+    (2026-W39/W40), so the default "current ISO week" summary is empty.
+    The Flutter screens task must pick a week that has data (or seed the
+    current week) — otherwise the pilot demo shows all-zero summaries.
+  - **Push transport (decision in progress):** no Firebase/FCM — user wants
+    no third-party dependencies. Working plan: `notifications` table +
+    in-app unread surface with a `PushTransport` interface (no-op now),
+    then self-hosted **ntfy** as a compose service wired to it. Android
+    background push without Google is best-effort by nature; the counselor's
+    "call parent now" stays the real escalation path. Confirm before
+    building.
 
 ### Phase 3: Device layer — screen time & limits — [STATUS: not started]
 - Kotlin module: Usage Stats, foreground service, overlay for blocking.

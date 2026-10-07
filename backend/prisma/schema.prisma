@@ -15,6 +15,27 @@ enum Role {
   ADMIN
 }
 
+enum Attendance {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+enum Homework {
+  DONE
+  PARTIAL
+  NOT_DONE
+  NOT_GIVEN
+}
+
+enum Behavior {
+  POSITIVE
+  NEUTRAL
+  CONCERN
+  SEVERE
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -26,6 +47,7 @@ model User {
   teacherClasses   TeacherClass[]
   counselorSchools CounselorSchool[]
   refreshTokens    RefreshToken[]
+  reportEntries    ReportEntry[]
 
   @@map("users")
 }
@@ -77,6 +99,7 @@ model Student {
 
   class   Class           @relation(fields: [classId], references: [id], onDelete: Cascade)
   parents ParentStudent[]
+  reportEntries ReportEntry[]
 
   @@index([classId])
   @@map("students")
@@ -113,4 +136,27 @@ model CounselorSchool {
   @@id([counselorId, schoolId])
   @@index([schoolId])
   @@map("counselor_school")
+}
+
+model ReportEntry {
+  id         String     @id @default(cuid())
+  studentId  String     @map("student_id")
+  authorId   String     @map("author_id")
+  reportDate DateTime   @map("report_date") @db.Date
+  attendance Attendance
+  homework   Homework
+  behavior   Behavior
+  note       String?
+  flagged    Boolean    @default(false)
+  flagReason String?    @map("flag_reason")
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  author  User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, authorId, reportDate])
+  @@index([reportDate])
+  @@index([authorId])
+  @@map("report_entries")
 }

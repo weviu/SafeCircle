@@ -1,5 +1,6 @@
 import { argon2id, hash } from 'argon2';
-import { PrismaClient, Role } from '../src/generated/prisma';
+import { Attendance, Behavior, Homework, PrismaClient, Role } from '../src/generated/prisma';
+import { evaluateFlags } from '../src/reports/flagging';
 
 const SEED_PASSWORD = 'Passw0rd!123';
 
@@ -44,6 +45,77 @@ async function upsertStudent(classId: string, name: string, schoolNumber: string
   const created = await prisma.student.create({ data: { classId, name, schoolNumber } });
   console.log(`created student ${name} (${schoolNumber})`);
   return created.id;
+}
+
+const REPORT_DAYS = [
+  '2026-09-21', // Mon, ISO week 2026-W39
+  '2026-09-22',
+  '2026-09-23',
+  '2026-09-24',
+  '2026-09-25', // Fri
+  '2026-09-28', // Mon, ISO week 2026-W40
+  '2026-09-29',
+  '2026-09-30',
+  '2026-10-01',
+  '2026-10-02', // Fri
+];
+
+interface SeedEntryValues {
+  attendance: Attendance;
+  homework: Homework;
+  behavior: Behavior;
+  note: string | null;
+}
+
+function baseEntry(studentIdx: number, dayIdx: number): SeedEntryValues {
+  let attendance: Attendance = Attendance.PRESENT;
+  if ((studentIdx + dayIdx) % 7 === 3) {
+    attendance = Attendance.LATE;
+  } else if ((studentIdx * 2 + dayIdx) % 11 === 5) {
+    attendance = Attendance.EXCUSED;
+  }
+
+  let homework: Homework = Homework.DONE;
+  if ((studentIdx + dayIdx) % 5 === 2) {
+    homework = Homework.PARTIAL;
+  } else if ((studentIdx + dayIdx) % 13 === 9) {
+    homework = Homework.NOT_GIVEN;
+  }
+
+  const behavior: Behavior = (studentIdx + dayIdx) % 6 === 0 ? Behavior.POSITIVE : Behavior.NEUTRAL;
+  const note =
+    (studentIdx + dayIdx) % 4 === 0 ? `Note for student ${studentIdx}, day ${dayIdx}.` : null;
+
+  return { attendance, homework, behavior, note };
+}
+
+function applySeedOverrides(
+  studentIdx: number,
+  dayIdx: number,
+  base: SeedEntryValues,
+): SeedEntryValues {
+  const values = { ...base };
+  // 1003 Zeynep (class A): present Mon-Tue, absent Wed-Fri of W39
+  // -> absence_streak flag appears only at day 4 (Fri), not before
+  if (studentIdx === 2 && dayIdx <= 1) {
+    values.attendance = Attendance.PRESENT;
+  }
+  if (studentIdx === 2 && dayIdx >= 2 && dayIdx <= 4) {
+    values.attendance = Attendance.ABSENT;
+  }
+  // 1001 Ayşe (class A): NOT_DONE Tue-Thu of W40 -> homework_streak flag at day 8
+  if (studentIdx === 0 && dayIdx >= 6 && dayIdx <= 8) {
+    values.homework = Homework.NOT_DONE;
+  }
+  // 1006 Can (class B): severe behavior day 1 (W39)
+  if (studentIdx === 5 && dayIdx === 1) {
+    values.behavior = Behavior.SEVERE;
+  }
+  // 1004 Mehmet (class B): concern behavior day 7 (W40)
+  if (studentIdx === 3 && dayIdx === 7) {
+    values.behavior = Behavior.CONCERN;
+  }
+  return values;
 }
 
 async function main(): Promise<void> {
@@ -99,6 +171,48 @@ async function main(): Promise<void> {
       update: {},
     });
   }
+
+  const studentIds = [student1Id, student2Id, student3Id, student4Id, student5Id, student6Id];
+  let entriesCreated = 0;
+  let entriesSkipped = 0;
+  let entriesFlagged = 0;
+  for (const [dayIdx, day] of REPORT_DAYS.entries()) {
+    const reportDate = new Date(`${day}T00:00:00Z`);
+    for (const [studentIdx, studentId] of studentIds.entries()) {
+      const authorId = studentIdx < 3 ? teacher1Id : teacher2Id;
+      const existing = await prisma.reportEntry.findUnique({
+        where: { studentId_authorId_reportDate: { studentId, authorId, reportDate } },
+        select: { id: true },
+      });
+      if (existing) {
+        entriesSkipped += 1;
+        continue;
+      }
+      const values = applySeedOverrides(studentIdx, dayIdx, baseEntry(studentIdx, dayIdx));
+      const context = await prisma.reportEntry.findMany({
+        where: { studentId, NOT: { authorId, reportDate } },
+      });
+      const flags = evaluateFlags(
+        {
+          reportDate,
+          attendance: values.attendance,
+          homework: values.homework,
+          behavior: values.behavior,
+        },
+        context,
+      );
+      const created = await prisma.reportEntry.create({
+        data: { studentId, authorId, reportDate, ...values, ...flags },
+      });
+      entriesCreated += 1;
+      if (created.flagged) {
+        entriesFlagged += 1;
+      }
+    }
+  }
+  console.log(
+    `Report entries: ${entriesCreated} created, ${entriesSkipped} skipped (already present), ${entriesFlagged} newly flagged`,
+  );
 
   console.log('Seed complete.');
   console.log(`Dev password for all seeded users: ${SEED_PASSWORD}`);

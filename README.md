@@ -56,6 +56,21 @@ curl -i http://localhost:8080/health
 Access tokens: JWT, 1-day expiry (`JWT_SECRET`). Refresh tokens: opaque,
 30 days, stored sha256-hashed.
 
+## API (Phase 2, reporting)
+
+| method | path                    | auth / role        | notes |
+| ------ | ----------------------- | ------------------ | ----- |
+| POST   | `/reports/entries`      | Bearer, TEACHER    | bulk upsert `{ classId, reportDate, entries[] }` → 201, idempotent per (student, author, date) |
+| GET    | `/reports/entries`      | Bearer, TEACHER    | `?classId=&date=` — caller's own entries for that class/day |
+| PATCH  | `/reports/entries/:id`  | Bearer, TEACHER    | author-only edit of attendance/homework/behavior/note; flags recomputed |
+| GET    | `/reports/summaries`    | Bearer, PARENT     | `?week=YYYY-Www` (default: current ISO week) — linked students' zero-filled weekly counts + notes |
+| GET    | `/reports/flagged`      | Bearer, TEACHER / COUNSELOR / ADMIN | `?week=` — flagged entries, scoped to own classes / own schools / all |
+
+Flag reasons, computed when an entry is written (no backfill):
+`behavior_severe`, `behavior_concern`, `absence_streak` (≥3 consecutive
+Mon–Fri school days all ABSENT/LATE), `homework_streak` (≥3 consecutive
+entries all NOT_DONE).
+
 ## App (Phase 1.5, Flutter skeleton)
 
 Flutter app in `app/` — Riverpod + go_router + dio. Login screen posts to

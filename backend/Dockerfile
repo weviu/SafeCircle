@@ -17,7 +17,7 @@ ENV NODE_ENV=production
 COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --chown=node:node --from=build /app/dist ./dist
-COPY --chown=node:node --from=build /app/src/generated/prisma ./src/generated/prisma
+COPY --chown=node:node --from=build /app/src ./src
 COPY --chown=node:node prisma ./prisma
 COPY --chown=node:node docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
