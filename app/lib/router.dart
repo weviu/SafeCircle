@@ -4,7 +4,9 @@ import 'package:go_router/go_router.dart';
 import 'providers.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
+import 'screens/parent_home.dart';
 import 'screens/splash_screen.dart';
+import 'screens/teacher_home.dart';
 
 String homeForRole(String role) {
   return switch (role) {
@@ -46,16 +48,16 @@ final routerProvider = Provider<GoRouter>((ref) {
     routes: [
       GoRoute(path: '/', builder: (context, state) => const SplashScreen()),
       GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
-      GoRoute(path: '/parent', builder: (context, state) => const HomeScreen()),
-      GoRoute(
-        path: '/teacher',
-        builder: (context, state) => const HomeScreen(),
-      ),
+      GoRoute(path: '/parent', builder: (context, state) => const ParentHome()),
+      GoRoute(path: '/teacher', builder: (context, state) => const TeacherHome()),
       GoRoute(
         path: '/counselor',
-        builder: (context, state) => const HomeScreen(),
+        builder: (context, state) => const PlaceholderHome(role: 'counselor'),
       ),
-      GoRoute(path: '/admin', builder: (context, state) => const HomeScreen()),
+      GoRoute(
+        path: '/admin',
+        builder: (context, state) => const PlaceholderHome(role: 'admin'),
+      ),
     ],
   );
 });

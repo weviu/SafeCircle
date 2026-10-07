@@ -65,19 +65,54 @@ Access tokens: JWT, 1-day expiry (`JWT_SECRET`). Refresh tokens: opaque,
 | PATCH  | `/reports/entries/:id`  | Bearer, TEACHER    | author-only edit of attendance/homework/behavior/note; flags recomputed |
 | GET    | `/reports/summaries`    | Bearer, PARENT     | `?week=YYYY-Www` (default: current ISO week) — linked students' zero-filled weekly counts + notes |
 | GET    | `/reports/flagged`      | Bearer, TEACHER / COUNSELOR / ADMIN | `?week=` — flagged entries, scoped to own classes / own schools / all |
+| GET    | `/classes`              | Bearer, TEACHER / ADMIN | caller's classes (teachers) or all classes (admin): `{id,name,grade,school{id,name}}`, ordered by grade/name |
+| GET    | `/classes/:id/students` | Bearer, TEACHER / ADMIN | `{id,name,schoolNumber}`, ordered by school number; 403 for a foreign class, 404 unknown |
 
 Flag reasons, computed when an entry is written (no backfill):
 `behavior_severe`, `behavior_concern`, `absence_streak` (≥3 consecutive
 Mon–Fri school days all ABSENT/LATE), `homework_streak` (≥3 consecutive
 entries all NOT_DONE).
 
-## App (Phase 1.5, Flutter skeleton)
+## App (Phase 1.5 + 2, Flutter)
 
 Flutter app in `app/` — Riverpod + go_router + dio. Login screen posts to
 `/auth/login`, stores the token pair (SharedPreferences), and a role-based
-router redirect lands on a role-specific placeholder home (`Hello, {role}`).
-A dio interceptor attaches the JWT, refreshes it on 401 (single-flight), and
-clears the session when refresh fails.
+router redirect lands on the role-specific home. A dio interceptor attaches
+the JWT, refreshes it on 401 (single-flight), and clears the session when
+refresh fails. Reporting screens:
+
+- **Teacher (`/teacher`)** — daily report for the teacher's class: pick a day
+  with the week arrows, set attendance/homework/behavior per student
+  (SegmentedButtons), add a short **Öğretmen notu** per student,
+  save with **Kaydet**. Wait for the response to show the auto-computed flag
+  chip (e.g. **Ödev şeridi**) on the affected student's row. Notes round-trip
+  via `GET /reports/entries`; an empty note field clears the stored note.
+- **Parent (`/parent`)** — weekly summary for every linked child: navigate
+  weeks with the arrows, `‹ ›` for the week. A child without records shows
+  "Bu hafta için kayıt yok" inside his/her card; when *no* child has records
+  the screen shows the week-level hint instead (the seed data lives in
+  **2026-W39/W40**; today's week, 2026-W41, is empty).
+- **Counselor / Admin (`/counselor`, `/admin`)** — placeholder home;
+  real screens arrive in Phase 4.
+
+### Demo walkthrough (seeded data)
+
+1. `docker compose up --build -d`, then `cd app && flutter run -d linux`.
+2. Teacher: `teacher1@test.local` / `Passw0rd!123` → class **5-A**.
+   Navigate back to **2026-09-28** (W40, seeded). Student 1001 Ayşe Yılmaz
+   shows *İzinli* (EXCUSED); set her homework to *Yapılmadı* and save — the
+   row gains a **Ödev şeridi** chip (seed's 09-29/09-30/10-01 are also
+   NOT_DONE, so the 3-day streak auto-flags). Also try **10-01** where the
+   seed already carries that flag.
+3. Parent: `parent2@test.local` / `Passw0rd!123` → weekly summary. The default
+   week (2026-W41) is empty; arrow back to **2026-W39**: children Zeynep Kaya
+   (badge **İşaretli: 1** — 09-25 absence-streak) and Mehmet Çelik, with
+   zero-filled attendance/homework/behavior counts per child.
+4. Counselor: `counselor1@test.local` → Phase-4 placeholder (in scope: the
+   role-scoped `GET /reports/flagged` endpoint, curl-verified).
+
+> Week/day navigation is the `‹ ›` arrow buttons — there is no calendar picker
+> yet, so reach seeded dates/W39–W40 by stepping back from today.
 
 ```bash
 cd app

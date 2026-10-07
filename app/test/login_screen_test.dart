@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:safecircle/config/api_config.dart';
 import 'package:safecircle/main.dart';
 import 'package:safecircle/screens/login_screen.dart';
+import 'package:safecircle/screens/teacher_home.dart';
 
 const _email = 'flutter-e2e@test.local';
 const _password = 'E2ePassw0rd!';
@@ -57,7 +58,7 @@ void main() {
     HttpOverrides.global = null;
   });
 
-  testWidgets('login → token stored → redirect to Hello, teacher', (
+  testWidgets('login → token stored → redirect to TeacherHome', (
     tester,
   ) async {
     await tester.runAsync(_ensureUserExists);
@@ -72,14 +73,20 @@ void main() {
     await tester.tap(find.text('Log in'));
     await tester.pump();
 
+    // The signup teacher owns no class, so TeacherHome renders its empty
+    // state once the (real) class list request lands.
     await _until(
       tester,
-      () => find.text('Hello, teacher').evaluate().isNotEmpty,
+      () => find.byType(TeacherHome).evaluate().isNotEmpty,
+    );
+    await _until(
+      tester,
+      () => find.text('Atandığınız sınıf yok').evaluate().isNotEmpty,
     );
     // Let the login→home page transition finish so LoginScreen is unmounted.
     await tester.pumpAndSettle();
 
-    expect(find.text('Hello, teacher'), findsOneWidget);
+    expect(find.text('Atandığınız sınıf yok'), findsOneWidget);
     expect(find.byType(LoginScreen), findsNothing);
 
     final prefs = await SharedPreferences.getInstance();

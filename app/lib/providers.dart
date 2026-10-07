@@ -6,6 +6,8 @@ import 'auth/auth_interceptor.dart';
 import 'auth/auth_repository.dart';
 import 'auth/session.dart';
 import 'config/api_config.dart';
+import 'reports/classes_repository.dart';
+import 'reports/reports_repository.dart';
 
 final tokenStoreProvider = Provider<TokenStore>((ref) => TokenStore());
 
@@ -28,4 +30,12 @@ final authControllerProvider = Provider<AuthController>(
     ref.watch(authRepositoryProvider),
     ref.watch(sessionProvider),
   ),
+);
+
+final classesRepositoryProvider = Provider<ClassesRepository>(
+  (ref) => ClassesRepository(ref.watch(dioProvider)),
+);
+
+final reportsRepositoryProvider = Provider<ReportsRepository>(
+  (ref) => ReportsRepository(ref.watch(dioProvider)),
 );

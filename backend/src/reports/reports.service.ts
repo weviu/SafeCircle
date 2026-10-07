@@ -245,15 +245,8 @@ export class ReportsService {
   }
 
   private async requireOwnedClass(teacherId: string, classId: string): Promise<string> {
-    const classes = await this.schools.classesByIds([classId]);
-    if (classes.length === 0) {
-      throw new NotFoundException(`class ${classId} not found`);
-    }
-    const owned = await this.schools.classesForTeacher(teacherId);
-    if (!owned.some((cls) => cls.id === classId)) {
-      throw new ForbiddenException('you do not teach this class');
-    }
-    return classes[0].id;
+    const cls = await this.schools.requireClassAccess(teacherId, Role.TEACHER, classId);
+    return cls.id;
   }
 
   private badWeek(week: string | undefined): never {

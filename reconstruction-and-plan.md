@@ -335,6 +335,61 @@ raised to the user first.
     (2026-W39/W40), so the default "current ISO week" summary is empty.
     The Flutter screens task must pick a week that has data (or seed the
     current week) — otherwise the pilot demo shows all-zero summaries.
+    **Resolved in the app step below via week/day arrow navigation.**
+  - **Verification note (2026-10-07, app + step-1 backend scope):**
+    - **Step-1 endpoints:** `GET /classes` and `GET /classes/:id/students`
+      (SchoolsController, SchoolsService) — teacher gets own classes with
+      `school{id,name}`, admin all classes, counselor/parent 403, no token
+      401; students ordered by school number; 404 unknown class, 403 foreign
+      class (teacher2 on class A). ReportsService.`requireOwnedClass`
+      delegates to SchoolsService.`requireClassAccess` so the ownership rule
+      is defined once. Curl transcript (12 cases + regressions):
+      `/tmp/opencode/phase2b-classes-curl.log`.
+    - **Flutter (`app/lib`):** `reports/{classes_repository,
+      reports_repository}.dart` (lists/creates entries, weekly summaries),
+      `reports/iso_week.dart` (ISO-8601 weeks, `yyyy-MM-dd`), `reports/
+      report_values.dart` (TR labels), `reports/reports_models.dart`;
+      `screens/teacher_home.dart` (day arrows, per-student SegmentedButtons,
+      per-student **Öğretmen notu** TextField — maxLines 2 / maxLength 500,
+      prefilled from GET /reports/entries — Kaydet → flag chip after save),
+      `screens/parent_home.dart` (week arrows, week-level empty state + demo
+      hint when *no* child has data, `İşaretli: N` badges; **all** linked
+      children are rendered, a child without records showing "Bu hafta için
+      kayıt yok" inside its card),
+      `screens/home_screen.dart` → `PlaceholderHome` for counselor/admin,
+      `router.dart` maps `/teacher`→TeacherHome, `/parent`→ParentHome,
+      `/counselor|/admin`→placeholder.
+    - **Fix round (2026-10-07, Phase 2b — note + child visibility):**
+      - **Note-clearing semantics:** `_EntryDraft` gained `note`; the payload
+        builder sends an empty/whitespace-only note as an *absent* `note`
+        field (`EntryPayload.toJson` omits `note` when null), which
+        `CreateReportDto` stores as NULL via `note: input.note ?? null` —
+        the variant that lets a teacher clear a note. A literal empty string
+        would be persisted as `''` (not cleared), so it is never sent.
+        The teacher test round-trips this: types "Randevu gerekli" on
+        2026-09-28 → submit → `GET /reports/entries` shows it → clears the
+        field → re-submit → `GET` shows NULL → restore seed (DONE, note NULL).
+      - **Parent child visibility:** the `hasData` filter is gone — **every
+        linked child always renders.** A child with no records shows
+        "Bu hafta için kayıt yok" inside its own card; when *no* child has
+        data, a single demo-data hint line is appended below the cards
+        (overser fix: the intermediate version hid all cards in that case,
+        which reproduced the exact "no records vs not linked" ambiguity the
+        fix was for). Covered by a
+        repository-stubbed widget test (data child + record-less child in the
+        same week) — the seeded W39 data always
+        gives both children records, so the inline branch needs the stub.
+      - Trailing newline restored at EOF of `home_screen.dart`.
+      - `flutter analyze` clean; 11/11 tests pass live; `flutter build linux`
+        green. Changes limited to `app/` (no backend/packages).
+    - **Deviations:** (1) the login-screen E2E user (`flutter-e2e@test.local`)
+      owns no class, so its test now asserts the TeacherHome *empty state*
+      (`Atandığınız sınıf yok`) instead of a class label; the seed teacher
+      flow lives in `reports_test.dart`. (2) screens use
+      `SingleChildScrollView + Column` (not lazy lists) so off-screen rows
+      stay findable in widget tests. (3) no new pubspec packages. Counselors
+      get the placeholder because only their `GET /reports/flagged`
+      endpoint is in Phase 2 scope — the counselor screen is Phase 4.
   - **Push transport (decision in progress):** no Firebase/FCM — user wants
     no third-party dependencies. Working plan: `notifications` table +
     in-app unread surface with a `PushTransport` interface (no-op now),

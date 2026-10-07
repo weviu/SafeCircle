@@ -1,33 +1,32 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../providers.dart';
+/// Landing shell for roles whose real screens arrive in a later phase.
+class PlaceholderHome extends StatelessWidget {
+  const PlaceholderHome({super.key, required this.role});
 
-class HomeScreen extends ConsumerWidget {
-  const HomeScreen({super.key});
+  /// Lowercase role, e.g. `counselor`.
+  final String role;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final sessionManager = ref.watch(sessionProvider);
-    return ListenableBuilder(
-      listenable: sessionManager,
-      builder: (context, _) {
-        final session = sessionManager.session;
-        if (session == null) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
-        }
-        return Scaffold(
-          appBar: AppBar(title: const Text('SafeCircle')),
-          body: Center(
-            child: Text(
-              'Hello, ${session.role.toLowerCase()}',
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('SafeCircle')),
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Hello, $role',
               style: Theme.of(context).textTheme.headlineMedium,
             ),
-          ),
-        );
-      },
+            const SizedBox(height: 8),
+            Text(
+              '${role.toUpperCase()} screens arrive in Phase 4',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
