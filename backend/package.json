@@ -1,0 +1,36 @@
+{
+  "name": "safecircle-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "nest build && mkdir -p dist/generated && cp -r src/generated/prisma dist/generated/prisma",
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "start:prod": "node dist/main.js",
+    "seed": "tsx prisma/seed.ts"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/config": "^12.0.1",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/jwt": "^12.0.2",
+    "@nestjs/platform-express": "^11.0.0",
+    "@prisma/client": "^6.19.3",
+    "argon2": "^0.45.1",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "prisma": "^6.19.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

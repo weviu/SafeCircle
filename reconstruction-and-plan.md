@@ -212,27 +212,68 @@ raised to the user first.
      `server_name` vhost on 80/443, or move the system Nginx out of the way.
    - Dockerfile uses `npm ci` (lockfile-exact installs) for reproducibility.
 
-### Phase 1: Core backend + data — [STATUS: not started]
+### Phase 1: Core backend + data — [STATUS: done]
 5. NestJS project scaffolded in `/backend`, module folders created:
-   `auth/`, `users/`, `schools/`.
-6. Prisma installed, `schema.prisma` written per data model above.
-7. First migration run (`prisma migrate dev`), tables confirmed in Postgres.
+   `auth/`, `users/`, `schools/`. ✅
+6. Prisma installed, `schema.prisma` written per data model above. ✅
+   - Prisma pinned to stable v6 (`^6.19.3`); v7/v8 are newer majors with
+     changed generator/engine defaults — revisit deliberately later.
+7. First migration run (`prisma migrate dev`), tables confirmed in Postgres. ✅
+   - `20261007084616_init/migration.sql` committed: 8 tables (`users`,
+     `refresh_tokens`, `schools`, `classes`, `students`, `parent_student`,
+     `teacher_class`, `counselor_school`), join tables use
+     composite PKs, all FKs `ON DELETE CASCADE`, no extra tables/columns.
+   - **Workflow (decision):** Postgres publishes no host port (Phase 0), so new
+     migrations are generated in a throwaway container:
+     `docker compose run --rm --entrypoint "" -v ./backend/prisma:/app/prisma api npx prisma migrate dev --name <name>`
+     The api entrypoint runs `migrate deploy` + `db seed` before `node
+     dist/main.js`, so a fresh `down -v && up --build` ends with schema +
+     seed data and no manual steps.
 8. Auth module: signup/login, argon2 hashing, JWT (1-day expiry) + refresh
-   token, NestJS guards keyed on `role`.
+   token, NestJS guards keyed on `role`. ✅
+   - Refresh tokens: opaque 48-byte random, sha256-hashed, 30-day TTL,
+     rotated on use; presenting a revoked token revokes the whole family.
+     Returned in the response body (no cookies).
+   - `@Public()` on login/signup/refresh/health; **logout requires a Bearer
+     token** (deliberately not on the public list).
+   - **Deviation recorded (accepted):** signup validates `name` but does not
+     persist it — the data model has no name column on `users`. Revisit via
+     migration when a display name is actually needed.
+   - `tsx` and `prisma` both sit in `dependencies`, not devDependencies: the
+     production image must run `prisma migrate deploy` and `prisma db seed`
+     from `docker-entrypoint.sh`, and `NODE_ENV=production` omits devDeps.
+     (`prisma` reaches the image via `@prisma/client`'s peer dep either way,
+     but declaring it explicitly keeps the boot-critical path from depending
+     on peer auto-install behavior.)
+   - No `PrismaModule` (kept to auth/users/schools): `PrismaService` is
+     provided directly by AuthModule and UsersModule.
 9. Seed script (Prisma seed) creating a test school/class/students — this is
-   the stand-in "admin panel" until a real one is built.
+   the stand-in "admin panel" until a real one is built. ✅
+   - Idempotent (upsert by natural key): 1 admin, 1 school, 2 classes,
+     6 students, 1 counselor, 2 teachers, 3 parents.
 
-### Phase 1.5: Flutter skeleton — [STATUS: not started]
+### Phase 1.5: Flutter skeleton — [STATUS: done]
 10. Flutter project scaffolded in `/app`, `riverpod` + `go_router` + `dio`
-    added.
+    added. ✅ (also `shared_preferences` for token storage — **deviation
+    recorded: plaintext prefs, not secure storage; move to
+    `flutter_secure_storage`/Keystore during Phase 5 hardening, not before**)
 11. `go_router` set up with role-based redirect (unauthenticated → login;
-    authenticated → role-specific home).
-12. `dio` client: base URL from config, interceptor attaching JWT, handling
-    401 (refresh or logout).
-13. **Milestone:** one real end-to-end screen — login → `POST /auth/login` →
-    token stored → redirect to placeholder home showing `Hello, {role}`. This
-    is the Phase 0/1 "done" marker. Don't proceed to Phase 2 features until
-    this works cleanly.
+    authenticated → role-specific home `/parent|/teacher|/counselor|/admin`;
+    another role's home is rejected). ✅
+12. `dio` client: base URL from `--dart-define=API_BASE_URL` (default
+    `http://localhost:8080`), interceptor attaching JWT, handling 401
+    (single-flight refresh → retry once, else clear session → login). ✅
+13. **Milestone:** login screen → `POST /auth/login` → tokens stored →
+    redirect to placeholder home showing `Hello, {role}`. ✅
+    - **Verification (deviation, accepted):** no Android SDK or Chrome in
+      this environment, so the end-to-end proof is `flutter test` —
+      widget tests driving the real screens against the real compose
+      stack (real signup/login/refresh HTTP; flutter_test stubs HTTP with
+      400s by default, cleared via `HttpOverrides.global = null`), plus
+      4 plain-Dart API/interceptor tests. All 6 pass; `flutter build
+      linux` also succeeds. `android/` is scaffolded and ready once the
+      SDK is installed (required from Phase 3 device work).
+    - `linux/` target added purely as a local dev harness, no product scope.
 
 ### Phase 2: School-side reporting — [STATUS: not started]
 - Teacher input screens (attendance/homework/behavior), rule-based flagging
@@ -300,3 +341,7 @@ correctly targeted.
 - AI/LLM integration for report generation and risk flagging — deferred
   until Phase 2 rule-based flagging is working and the team wants to improve
   on it.
+- Prisma 7 upgrade: `package.json#prisma` (the seed config) is deprecated
+  and removed in v7 — before any Prisma major bump, migrate to
+  `prisma.config.ts`. Boot logs already warn about it. Not urgent while
+  pinned to v6.
